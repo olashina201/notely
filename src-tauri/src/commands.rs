@@ -429,6 +429,36 @@ pub async fn overlay_set_stealth(app: AppHandle, enabled: bool) -> Result<bool, 
     Ok(enabled)
 }
 #[tauri::command]
+pub async fn overlay_focus(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::{c_char, c_void};
+            extern "C" {
+                fn objc_getClass(name: *const c_char) -> *mut c_void;
+                fn sel_registerName(name: *const c_char) -> *const c_void;
+                fn objc_msgSend();
+            }
+            type MsgSendBool = unsafe extern "C" fn(*mut c_void, *const c_void, i32);
+            let _ = w.app_handle().run_on_main_thread(move || {
+                unsafe {
+                    let cls_app = objc_getClass(b"NSApplication\0".as_ptr() as *const c_char);
+                    let sel_shared = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
+                    let get_app: unsafe extern "C" fn(*mut c_void, *const c_void) -> *mut c_void = std::mem::transmute(objc_msgSend as *const ());
+                    let ns_app = get_app(cls_app, sel_shared);
+                    if !ns_app.is_null() {
+                        let sel_activate = sel_registerName(b"activateIgnoringOtherApps:\0".as_ptr() as *const c_char);
+                        let activate: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
+                        activate(ns_app, sel_activate, 1i32);
+                    }
+                }
+            });
+        }
+    }
+    Ok(())
+}
+#[tauri::command]
 pub async fn register_hotkeys_cmd(app: AppHandle, hotkeys: std::collections::HashMap<String, String>) -> Result<(), String> {
     crate::register_hotkeys(&app, &hotkeys);
     Ok(())

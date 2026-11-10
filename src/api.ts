@@ -35,6 +35,7 @@ export const commands = {
   overlayToggleClickthrough: () => invoke<boolean>('overlay_toggle_clickthrough'),
   overlayToggleStealth: () => invoke<boolean>('overlay_toggle_stealth'),
   overlaySetStealth: (enabled: boolean) => invoke<boolean>('overlay_set_stealth', { enabled }),
+  overlayFocus: () => invoke<void>('overlay_focus'),
   registerHotkeys: (hotkeys: Record<string, string>) => invoke<void>('register_hotkeys_cmd', { hotkeys }),
 };
 

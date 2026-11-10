@@ -29,12 +29,17 @@ pub fn make_window_always_on_top(w: &tauri::WebviewWindow) {
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn yes_imp(_this: *mut std::ffi::c_void, _cmd: *const std::ffi::c_void) -> i8 {
+    1
+}
+
+#[cfg(target_os = "macos")]
 pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
     use std::ffi::{c_char, c_void};
 
     extern "C" {
-        fn objc_getClass(name: *const c_char) -> *mut c_void;
-        fn object_setClass(obj: *mut c_void, cls: *mut c_void) -> *mut c_void;
+        fn object_getClass(obj: *mut c_void) -> *mut c_void;
+        fn class_replaceMethod(cls: *mut c_void, name: *const c_void, imp: unsafe extern "C" fn(*mut c_void, *const c_void) -> i8, types: *const c_char) -> *mut c_void;
         fn sel_registerName(name: *const c_char) -> *const c_void;
         fn objc_msgSend();
     }
@@ -47,13 +52,14 @@ pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
     if let Ok(ptr) = w.ns_window() {
         if !ptr.is_null() {
             unsafe {
-                // Morph to NSPanel so AppKit treats it as an auxiliary floating panel
-                let cls_panel = objc_getClass(b"NSPanel\0".as_ptr() as *const c_char);
-                if !cls_panel.is_null() {
-                    object_setClass(ptr, cls_panel);
-                    let sel_set_floating = sel_registerName(b"setFloatingPanel:\0".as_ptr() as *const c_char);
-                    let set_floating: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
-                    set_floating(ptr, sel_set_floating, 1i32);
+                // Ensure the window class allows key & main window focus so input fields accept typing.
+                let cls = object_getClass(ptr);
+                if !cls.is_null() {
+                    let sel_can_become_key = sel_registerName(b"canBecomeKeyWindow\0".as_ptr() as *const c_char);
+                    let sel_can_become_main = sel_registerName(b"canBecomeMainWindow\0".as_ptr() as *const c_char);
+                    let types = b"c@:\0".as_ptr() as *const c_char;
+                    class_replaceMethod(cls, sel_can_become_key, yes_imp, types);
+                    class_replaceMethod(cls, sel_can_become_main, yes_imp, types);
                 }
 
                 // 1. Level 101 (NSPopUpMenuWindowLevel / kCGPopUpMenuWindowLevel)
@@ -227,7 +233,7 @@ fn main() {
             commands::notes_generate,
             commands::history_list, commands::history_search, commands::history_get, commands::history_delete,
             commands::overlay_hide, commands::overlay_show, commands::overlay_toggle_clickthrough,
-            commands::overlay_toggle_stealth, commands::overlay_set_stealth,
+            commands::overlay_toggle_stealth, commands::overlay_set_stealth, commands::overlay_focus,
             commands::register_hotkeys_cmd,
         ])
         .run(tauri::generate_context!())

@@ -89,6 +89,16 @@ export function App() {
   settingsRef.current = settings;
   const streamingRef = React.useRef(false);
   const selectorSaved = React.useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (ready && panel === 'assist') {
+      const t = setTimeout(() => {
+        inputRef.current?.focus();
+      }, 80);
+      return () => clearTimeout(t);
+    }
+  }, [ready, panel]);
 
   // ---- initial load ----
   React.useEffect(() => {
@@ -445,9 +455,13 @@ export function App() {
             {captures.length > 0 && <CapturesBar captures={captures} onClear={() => void clearCaptures()} />}
 
             {/* Input row */}
-            <div className="px-4 pb-4 pt-1">
+            <div className="px-4 pb-4 pt-1" onClick={() => { commands.overlayFocus().catch(() => {}); inputRef.current?.focus(); }}>
               <div className="rounded-2xl border border-white/12 bg-white/[0.06] px-3.5 pt-2.5 pb-2">
-                <input value={question} onChange={(e) => setQuestion(e.target.value)}
+                <input
+                  ref={inputRef}
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onFocus={() => { commands.overlayFocus().catch(() => {}); }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
