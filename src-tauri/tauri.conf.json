@@ -29,7 +29,7 @@
         "contentProtected": true,
         "center": true,
         "acceptFirstMouse": true,
-        "visibleOnAllWorkspaces": true
+        "visibleOnAllWorkspaces": false
       }
     ],
     "security": {

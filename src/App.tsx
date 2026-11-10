@@ -155,7 +155,13 @@ export function App() {
       setAskingElapsed(0);
       if (d.error) setErr(d.error);
     }).then((u) => subs.push(u));
-    events.onError((e) => setErr(e.message)).then((u) => subs.push(u));
+    events.onError((e) => {
+      streamingRef.current = false;
+      setStreaming(false);
+      setAsking(false);
+      setAskingElapsed(0);
+      setErr(e.message);
+    }).then((u) => subs.push(u));
     events.onStealthChanged((p) => {
       setSettings((s) => ({ ...s, contentProtection: p.stealth }));
     }).then((u) => subs.push(u));

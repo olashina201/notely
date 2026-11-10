@@ -1,32 +1,40 @@
 //! Assist: streaming generateContent with transcript + screenshots.
 use crate::gemini;
 use crate::state::{events, AssistRequest, CapturedImage, TranscriptLine};
-use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::watch;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter};
+use tokio::sync::Notify;
 
-static CANCEL_TX: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
+struct CancelHandle {
+    flag: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+static CANCEL_HANDLE: Mutex<Option<CancelHandle>> = Mutex::new(None);
 
 pub fn cancel_current() {
-    if let Ok(guard) = CANCEL_TX.lock() {
-        if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(true);
+    if let Ok(mut guard) = CANCEL_HANDLE.lock() {
+        if let Some(handle) = guard.take() {
+            handle.flag.store(true, Ordering::SeqCst);
+            handle.notify.notify_waiters();
         }
     }
 }
 
-fn create_cancel_receiver() -> watch::Receiver<bool> {
-    let (tx, rx) = watch::channel(false);
-    if let Ok(mut guard) = CANCEL_TX.lock() {
-        *guard = Some(tx);
+fn create_cancel_handle() -> (Arc<AtomicBool>, Arc<Notify>) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let notify = Arc::new(Notify::new());
+    if let Ok(mut guard) = CANCEL_HANDLE.lock() {
+        *guard = Some(CancelHandle {
+            flag: flag.clone(),
+            notify: notify.clone(),
+        });
     }
-    rx
+    (flag, notify)
 }
 
 pub fn emit_all<S: serde::Serialize + Clone>(app: &AppHandle, ev: &str, payload: S) {
-    if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.emit(ev, payload.clone());
-    }
     let _ = app.emit(ev, payload);
 }
 
@@ -65,7 +73,7 @@ pub async fn run_assist(
     search_grounding: bool,
 ) -> Result<(), String> {
     cancel_current();
-    let mut cancel_rx = create_cancel_receiver();
+    let (cancel_flag, cancel_notify) = create_cancel_handle();
 
     let system = profile_system(&req.profile_id, &req.custom_instructions.clone().unwrap_or_default());
     let window_text = transcript_window(&transcript, 40);
@@ -85,7 +93,8 @@ pub async fn run_assist(
         &api_key,
         &primary_model,
         &body,
-        &mut cancel_rx,
+        cancel_flag,
+        cancel_notify,
         events::ASSIST_CHUNK,
         events::ASSIST_DONE,
     )
@@ -101,12 +110,13 @@ async fn stream_with_fallbacks(
     api_key: &str,
     primary_model: &str,
     body: &serde_json::Value,
-    cancel_rx: &mut watch::Receiver<bool>,
+    cancel_flag: Arc<AtomicBool>,
+    cancel_notify: Arc<Notify>,
     chunk_ev: &str,
     done_ev: &str,
 ) -> Result<(), String> {
     let mut candidate_models = vec![primary_model.to_string()];
-    for fallback in &["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite-preview"] {
+    for fallback in &["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite-preview"] {
         if !candidate_models.iter().any(|m| m == fallback) {
             candidate_models.push(fallback.to_string());
         }
@@ -121,7 +131,8 @@ async fn stream_with_fallbacks(
     let mut last_err = String::new();
 
     for (idx, model) in candidate_models.iter().enumerate() {
-        if *cancel_rx.borrow() {
+        if cancel_flag.load(Ordering::SeqCst) {
+            eprintln!("[assist] Request cancelled before model {model}");
             emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
             return Ok(());
         }
@@ -136,11 +147,13 @@ async fn stream_with_fallbacks(
         }
 
         let url = gemini::stream_url(model, api_key);
+        eprintln!("[assist] Sending stream request to model '{model}' (candidate {idx})...");
         let send_fut = client.post(&url).json(&req_body).send();
 
         let resp = tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
+            _ = cancel_notify.notified() => {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    eprintln!("[assist] Request cancelled by user during connect");
                     emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
                     return Ok(());
                 }
@@ -152,14 +165,17 @@ async fn stream_with_fallbacks(
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
+                eprintln!("[assist] Connection error for {model}: {e}");
                 last_err = format!("Connection failed for {model}: {e}");
                 continue;
             }
         };
 
         let status = resp.status();
+        eprintln!("[assist] Model '{model}' responded with HTTP {status}");
         if !status.is_success() {
             let b = resp.text().await.unwrap_or_default();
+            eprintln!("[assist] Error body from {model}: {b}");
             last_err = format!("Model {model} ({status}): {}", clean_quota_msg(&b));
             // Automatically try next candidate in fallback chain
             continue;
@@ -171,9 +187,10 @@ async fn stream_with_fallbacks(
             emit_all(app, chunk_ev, serde_json::json!({"text": notice}));
         }
 
-        return read_sse(app, resp, cancel_rx, chunk_ev, done_ev).await;
+        return read_sse(app, resp, cancel_flag, cancel_notify, chunk_ev, done_ev).await;
     }
 
+    eprintln!("[assist] All candidate models failed. Last error: {last_err}");
     Err(if last_err.is_empty() {
         "All model requests failed. Please check your API quota or connection.".to_string()
     } else {
@@ -204,7 +221,8 @@ fn trunc(s: &str) -> String {
 async fn read_sse(
     app: &AppHandle,
     resp: reqwest::Response,
-    cancel_rx: &mut watch::Receiver<bool>,
+    cancel_flag: Arc<AtomicBool>,
+    cancel_notify: Arc<Notify>,
     chunk_ev: &str,
     done_ev: &str,
 ) -> Result<(), String> {
@@ -215,9 +233,16 @@ async fn read_sse(
     let mut stream_error: Option<String> = None;
 
     loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            eprintln!("[assist] SSE stream cancelled by user.");
+            emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
+            return Ok(());
+        }
+
         let next_item = tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
+            _ = cancel_notify.notified() => {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    eprintln!("[assist] SSE stream cancelled via notify.");
                     emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
                     return Ok(());
                 }
@@ -243,10 +268,12 @@ async fn read_sse(
                 if let Some(data) = trimmed.strip_prefix("data:") {
                     let d = data.trim();
                     if let Some(err_msg) = gemini::extract_stream_error(d) {
+                        eprintln!("[assist] SSE data error: {err_msg}");
                         stream_error = Some(err_msg);
                     }
                     for t in gemini::extract_stream_text(d) {
                         received_any = true;
+                        eprintln!("[assist] Emitting chunk: {:?}", t);
                         emit_all(app, chunk_ev, serde_json::json!({"text": t}));
                     }
                 }
@@ -270,6 +297,7 @@ async fn read_sse(
     }
 
     if let Some(err) = stream_error {
+        eprintln!("[assist] Stream error encountered: {err}");
         emit_all(app, events::ERROR, serde_json::json!({"message": err}));
         emit_all(app, done_ev, serde_json::json!({"error": err}));
         return Ok(());
@@ -277,11 +305,13 @@ async fn read_sse(
 
     if !received_any {
         let err_msg = "No response text received from model";
+        eprintln!("[assist] {err_msg}");
         emit_all(app, events::ERROR, serde_json::json!({"message": err_msg}));
         emit_all(app, done_ev, serde_json::json!({"error": err_msg}));
         return Ok(());
     }
 
+    eprintln!("[assist] Streaming completed successfully.");
     emit_all(app, done_ev, serde_json::json!({}));
     Ok(())
 }

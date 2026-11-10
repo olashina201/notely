@@ -70,11 +70,13 @@ pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
                 set_level(ptr, sel_set_level, 101i64);
 
                 // 2. Set collection behavior:
-                // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0 (1)
+                // NSWindowCollectionBehaviorMoveToActiveSpace = 1 << 1 (2)
                 // NSWindowCollectionBehaviorIgnoresCycle = 1 << 6 (64)
                 // NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 (256)
-                // NOTE: Do NOT use (1 << 4) (Stationary) as it locks the window to its originating space!
-                let behavior: usize = (1 << 0) | (1 << 6) | (1 << 8);
+                // Total = 2 | 64 | 256 = 322.
+                // NOTE: MoveToActiveSpace enables Notely to follow the user into any fullscreen space
+                // (e.g. Antigravity IDE, Google Chrome, etc.) and float on top.
+                let behavior: usize = (1 << 1) | (1 << 6) | (1 << 8);
                 let sel_set_behavior = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
                 let set_behavior: MsgSendBehavior = std::mem::transmute(objc_msgSend as *const ());
                 set_behavior(ptr, sel_set_behavior, behavior);
@@ -110,7 +112,6 @@ fn main() {
                 let _ = w.set_content_protected(loaded.content_protection);
                 let _ = w.set_ignore_cursor_events(loaded.click_through);
                 let _ = w.set_always_on_top(true);
-                let _ = w.set_visible_on_all_workspaces(true);
                 make_window_always_on_top(&w);
                 #[cfg(target_os = "macos")]
                 {
@@ -123,7 +124,7 @@ fn main() {
             // expand, maximize, open modal dialogs, or transition to fullscreen Spaces.
             let monitor_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
                 loop {
                     interval.tick().await;
                     let h = monitor_handle.clone();
@@ -163,7 +164,6 @@ fn main() {
                             if let Some(w) = app.get_webview_window("overlay") {
                                 let _ = w.show();
                                 let _ = w.set_always_on_top(true);
-                                let _ = w.set_visible_on_all_workspaces(true);
                                 make_window_always_on_top(&w);
                                 let _ = w.set_focus();
                             }

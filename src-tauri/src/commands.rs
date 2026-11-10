@@ -315,6 +315,7 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
     let key = resolve_key(&app)?;
     let s = store.get();
     let model = if req.slot == "smart" { s.smart_model.clone() } else { s.fast_model.clone() };
+    eprintln!("[assist_run] received request: slot={}, question='{}', model='{}'", req.slot, req.question, model);
     let (transcript, existing_imgs) = {
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
         (m.transcript.clone(), m.captures.clone())
@@ -332,6 +333,7 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
         }
         let recent: Vec<CapturedImage> = images.into_iter().rev().take(4).rev().collect();
         if let Err(e) = assist::run_assist(app2.clone(), key, model, req, transcript, recent, s.thinking_level.clone(), s.search_grounding).await {
+            eprintln!("[assist_run] assist failed: {e}");
             assist::emit_all(&app2, events::ERROR, serde_json::json!({"message": e}));
             assist::emit_all(&app2, events::ASSIST_DONE, serde_json::json!({"error": e}));
         }
