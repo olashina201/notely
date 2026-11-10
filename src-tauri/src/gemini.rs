@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 /// Model IDs live here and ONLY here. Google retires and renames models often;
 /// Settings model pickers are populated from the live models list endpoint.
 pub const FALLBACK_LIVE_MODEL: &str = "gemini-2.0-flash-live-001";
-pub const FALLBACK_FAST_MODEL: &str = "gemini-2.5-flash";
-pub const FALLBACK_SMART_MODEL: &str = "gemini-3.5-flash";
+pub const FALLBACK_FAST_MODEL: &str = "gemini-3.1-flash-lite";
+pub const FALLBACK_SMART_MODEL: &str = "gemini-3.1-flash-lite";
 
 const REST_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -91,13 +91,13 @@ pub fn build_contents(
     })
 }
 
-/// generationConfig for a slot. Fast = low/no thinking, Smart = more thinking.
+/// generationConfig for a slot. Fast = no thinkingConfig (avoids HTTP 400), Smart = more thinking.
 pub fn generation_config(slot: &str, thinking_level: &str, json_mode: bool) -> serde_json::Value {
     let budget: Option<i32> = match (slot, thinking_level) {
-        ("fast", _) => Some(0),
-        (_, "off") => Some(0),
-        (_, "low") => Some(512),
-        (_, "high") => Some(2048),
+        ("fast", _) => None,
+        (_, "off") => None,
+        (_, "low") => Some(0),
+        (_, "high") => Some(1024),
         _ => None,
     };
     let mut cfg = serde_json::json!({ "temperature": 0.7 });

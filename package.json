@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "app:build": "npm run build && cargo build --release --manifest-path src-tauri/Cargo.toml && cp src-tauri/target/release/notely /Applications/Notely.app/Contents/MacOS/notely && codesign --force --deep --sign - --identifier 'com.notely.desktop' --requirements '=designated => identifier \"com.notely.desktop\"' --entitlements src-tauri/entitlements.mac.plist /Applications/Notely.app",
+    "app:run": "npm run app:build && (killall notely 2>/dev/null || true) && open /Applications/Notely.app"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",

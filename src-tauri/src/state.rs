@@ -25,6 +25,7 @@ impl Default for Settings {
     fn default() -> Self {
         let mut hotkeys = HashMap::new();
         hotkeys.insert("assist".into(), "CommandOrControl+Enter".into());
+        hotkeys.insert("toggleStealth".into(), "CommandOrControl+Shift+X".into());
         hotkeys.insert("captureFull".into(), "CommandOrControl+Shift+S".into());
         hotkeys.insert("captureRegion".into(), "CommandOrControl+Shift+A".into());
         hotkeys.insert("panicHide".into(), "CommandOrControl+Shift+H".into());
@@ -93,5 +94,6 @@ pub mod events {
     pub const CAPTURE_TAKEN: &str = "capture.taken";
     pub const ASSIST_CHUNK: &str = "assist.chunk";
     pub const ASSIST_DONE: &str = "assist.done";
+    pub const STEALTH_CHANGED: &str = "stealth.changed";
     pub const ERROR: &str = "error";
 }

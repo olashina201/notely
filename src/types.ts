@@ -98,6 +98,7 @@ export const PRESETS = [
 
 export const DEFAULT_HOTKEYS: Record<string, string> = {
   assist: 'CommandOrControl+Enter',
+  toggleStealth: 'CommandOrControl+Shift+X',
   captureFull: 'CommandOrControl+Shift+S',
   captureRegion: 'CommandOrControl+Shift+A',
   panicHide: 'CommandOrControl+Shift+H',
@@ -110,10 +111,11 @@ export const DEFAULT_HOTKEYS: Record<string, string> = {
 
 export const HOTKEY_ACTIONS = [
   { id: 'assist', label: 'Assist (ask with transcript + screen)' },
-  { id: 'captureFull', label: 'Silent full screenshot' },
-  { id: 'captureRegion', label: 'Region screenshot (selector)' },
+  { id: 'toggleStealth', label: 'Toggle stealth mode' },
   { id: 'panicHide', label: 'Panic hide overlay' },
   { id: 'toggleClickThrough', label: 'Toggle click-through' },
+  { id: 'captureRegion', label: 'Region screenshot (selector)' },
+  { id: 'captureFull', label: 'Silent full screenshot' },
   { id: 'say', label: 'Preset: What should I say?' },
   { id: 'followup', label: 'Preset: Follow-up questions' },
   { id: 'recap', label: 'Preset: Recap' },

@@ -17,6 +17,79 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+#[cfg(target_os = "macos")]
+pub fn make_window_always_on_top(w: &tauri::WebviewWindow) {
+    let app = w.app_handle().clone();
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app2.get_webview_window("overlay") {
+            apply_macos_window_levels(&win);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
+    use std::ffi::{c_char, c_void};
+
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn object_setClass(obj: *mut c_void, cls: *mut c_void) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+        fn objc_msgSend();
+    }
+
+    type MsgSendLevel = unsafe extern "C" fn(*mut c_void, *const c_void, i64);
+    type MsgSendBehavior = unsafe extern "C" fn(*mut c_void, *const c_void, usize);
+    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *const c_void, i32);
+    type MsgSendVoid = unsafe extern "C" fn(*mut c_void, *const c_void);
+
+    if let Ok(ptr) = w.ns_window() {
+        if !ptr.is_null() {
+            unsafe {
+                // Morph to NSPanel so AppKit treats it as an auxiliary floating panel
+                let cls_panel = objc_getClass(b"NSPanel\0".as_ptr() as *const c_char);
+                if !cls_panel.is_null() {
+                    object_setClass(ptr, cls_panel);
+                    let sel_set_floating = sel_registerName(b"setFloatingPanel:\0".as_ptr() as *const c_char);
+                    let set_floating: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
+                    set_floating(ptr, sel_set_floating, 1i32);
+                }
+
+                // 1. Level 101 (NSPopUpMenuWindowLevel / kCGPopUpMenuWindowLevel)
+                // Ensures it floats directly above all normal, modal, maximized, and full-screen windows
+                // across all applications (Google Chrome, Antigravity IDE, Slack, etc.).
+                let sel_set_level = sel_registerName(b"setLevel:\0".as_ptr() as *const c_char);
+                let set_level: MsgSendLevel = std::mem::transmute(objc_msgSend as *const ());
+                set_level(ptr, sel_set_level, 101i64);
+
+                // 2. Set collection behavior:
+                // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0 (1)
+                // NSWindowCollectionBehaviorIgnoresCycle = 1 << 6 (64)
+                // NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 (256)
+                // NOTE: Do NOT use (1 << 4) (Stationary) as it locks the window to its originating space!
+                let behavior: usize = (1 << 0) | (1 << 6) | (1 << 8);
+                let sel_set_behavior = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
+                let set_behavior: MsgSendBehavior = std::mem::transmute(objc_msgSend as *const ());
+                set_behavior(ptr, sel_set_behavior, behavior);
+
+                // 3. Do NOT hide when user switches to or clicks another app
+                let sel_set_hides = sel_registerName(b"setHidesOnDeactivate:\0".as_ptr() as *const c_char);
+                let set_hides: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
+                set_hides(ptr, sel_set_hides, 0i32); // NO / false
+
+                // 4. orderFrontRegardless brings it in front across all spaces and apps
+                let sel_order_front = sel_registerName(b"orderFrontRegardless\0".as_ptr() as *const c_char);
+                let order_front: MsgSendVoid = std::mem::transmute(objc_msgSend as *const ());
+                order_front(ptr, sel_order_front);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn make_window_always_on_top(_w: &tauri::WebviewWindow) {}
+
 fn main() {
     tauri::Builder::default()
         .manage(SettingsStore(std::sync::Mutex::new(state::Settings::default())))
@@ -30,19 +103,33 @@ fn main() {
             if let Some(w) = handle.get_webview_window("overlay") {
                 let _ = w.set_content_protected(loaded.content_protection);
                 let _ = w.set_ignore_cursor_events(loaded.click_through);
-                // Stealth float: stay above all other apps, no dock/taskbar entry.
-                // Always-on-top (NSFloatingWindowLevel) + visible on all Spaces so it
-                // follows you into fullscreen apps / other desktops instead of
-                // getting stranded behind them.
                 let _ = w.set_always_on_top(true);
                 let _ = w.set_visible_on_all_workspaces(true);
+                make_window_always_on_top(&w);
                 #[cfg(target_os = "macos")]
                 {
-                    // Accessory activation policy: no dock icon, no Cmd-Tab entry.
                     use tauri::ActivationPolicy;
                     let _ = app.set_activation_policy(ActivationPolicy::Accessory);
                 }
             }
+
+            // Continuous float monitor: ensures Notely stays pinned on top even when other apps
+            // expand, maximize, open modal dialogs, or transition to fullscreen Spaces.
+            let monitor_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
+                loop {
+                    interval.tick().await;
+                    let h = monitor_handle.clone();
+                    let h2 = monitor_handle.clone();
+                    let _ = h.run_on_main_thread(move || {
+                        if let Some(w) = h2.get_webview_window("overlay") {
+                            #[cfg(target_os = "macos")]
+                            apply_macos_window_levels(&w);
+                        }
+                    });
+                }
+            });
             register_hotkeys(&handle, &loaded.hotkeys);
 
             // System tray icon: gives users a permanent recovery path to show/hide
@@ -50,10 +137,11 @@ fn main() {
             let show_i = MenuItem::with_id(app, "show", "Show Notely", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide", "Hide Notely", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
+            let toggle_stealth = MenuItem::with_id(app, "toggle_stealth", "Toggle Stealth Mode (🥷)", true, None::<&str>)?;
             let toggle_ct = MenuItem::with_id(app, "toggle_clickthrough", "Toggle Click-Through", true, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit Notely", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &sep1, &toggle_ct, &sep2, &quit_i])?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &sep1, &toggle_stealth, &toggle_ct, &sep2, &quit_i])?;
 
             let img = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
                 .map_err(|e| format!("failed to load tray icon: {e}"))?;
@@ -70,6 +158,7 @@ fn main() {
                                 let _ = w.show();
                                 let _ = w.set_always_on_top(true);
                                 let _ = w.set_visible_on_all_workspaces(true);
+                                make_window_always_on_top(&w);
                                 let _ = w.set_focus();
                             }
                         }
@@ -85,6 +174,21 @@ fn main() {
                             if let Some(w) = app.get_webview_window("overlay") {
                                 let _ = w.set_ignore_cursor_events(next);
                             }
+                        }
+                        "toggle_stealth" => {
+                            let store = app.state::<SettingsStore>();
+                            let next = !store.get().content_protection;
+                            store.modify(|s| s.content_protection = next);
+                            let _ = settings::save_settings(app, &store.get());
+                            if let Some(w) = app.get_webview_window("overlay") {
+                                let _ = w.set_content_protected(next);
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                use tauri::ActivationPolicy;
+                                let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+                            }
+                            let _ = app.emit(state::events::STEALTH_CHANGED, serde_json::json!({"stealth": next}));
                         }
                         "quit" => {
                             app.exit(0);
@@ -102,6 +206,7 @@ fn main() {
                                 let _ = w.show();
                                 let _ = w.set_always_on_top(true);
                                 let _ = w.set_visible_on_all_workspaces(true);
+                                make_window_always_on_top(&w);
                                 let _ = w.set_focus();
                             }
                         }
@@ -122,6 +227,7 @@ fn main() {
             commands::notes_generate,
             commands::history_list, commands::history_search, commands::history_get, commands::history_delete,
             commands::overlay_hide, commands::overlay_show, commands::overlay_toggle_clickthrough,
+            commands::overlay_toggle_stealth, commands::overlay_set_stealth,
             commands::register_hotkeys_cmd,
         ])
         .run(tauri::generate_context!())
@@ -132,7 +238,8 @@ pub(crate) fn register_hotkeys(app: &AppHandle, hotkeys: &std::collections::Hash
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     let actions: &[(&str, &str)] = &[
-        ("assist", "assist"), ("captureFull", "capture_full"), ("captureRegion", "capture_region"),
+        ("assist", "assist"), ("toggleStealth", "toggle_stealth"),
+        ("captureFull", "capture_full"), ("captureRegion", "capture_region"),
         ("panicHide", "panic_hide"), ("toggleClickThrough", "toggle_clickthrough"),
         ("say", "preset:say"), ("followup", "preset:followup"), ("recap", "preset:recap"), ("screen", "preset:screen"),
     ];
@@ -170,6 +277,9 @@ fn handle_hotkey(app: &AppHandle, tag: &str) {
                     let _ = w.hide();
                 } else {
                     let _ = w.show();
+                    let _ = w.set_always_on_top(true);
+                    let _ = w.set_visible_on_all_workspaces(true);
+                    make_window_always_on_top(&w);
                     let _ = w.set_focus();
                 }
             }
@@ -179,6 +289,21 @@ fn handle_hotkey(app: &AppHandle, tag: &str) {
             let next = !store.get().click_through;
             store.modify(|s| s.click_through = next);
             if let Some(w) = app.get_webview_window("overlay") { let _ = w.set_ignore_cursor_events(next); }
+        }
+        "toggle_stealth" => {
+            let store = app.state::<SettingsStore>();
+            let next = !store.get().content_protection;
+            store.modify(|s| s.content_protection = next);
+            let _ = settings::save_settings(app, &store.get());
+            if let Some(w) = app.get_webview_window("overlay") {
+                let _ = w.set_content_protected(next);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::ActivationPolicy;
+                let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+            }
+            let _ = app.emit(state::events::STEALTH_CHANGED, serde_json::json!({"stealth": next}));
         }
         "capture_full" => {
             let a = app.clone();

@@ -134,14 +134,21 @@ export function App() {
     }).then((u) => subs.push(u));
     events.onTranscriptStatus((s) => setLiveStatus(s.status)).then((u) => subs.push(u));
     events.onCaptureTaken((img) => setCaptures((c) => [...c, img].slice(-4))).then((u) => subs.push(u));
-    events.onAssistChunk((c) => setAnswer((a) => a + c.text)).then((u) => subs.push(u));
+    events.onAssistChunk((c) => {
+      setAnswer((a) => a + c.text);
+      setAsking(false);
+    }).then((u) => subs.push(u));
     events.onAssistDone((d) => {
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
+      setAskingElapsed(0);
       if (d.error) setErr(d.error);
     }).then((u) => subs.push(u));
     events.onError((e) => setErr(e.message)).then((u) => subs.push(u));
+    events.onStealthChanged((p) => {
+      setSettings((s) => ({ ...s, contentProtection: p.stealth }));
+    }).then((u) => subs.push(u));
     events.onHotkeyAssist(() => {
       if (!streamingRef.current) void runAssist(null);
     }).then((u) => subs.push(u));
@@ -155,9 +162,10 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-clear errors after a few seconds.
+  // Auto-clear transient errors after a few seconds, but keep quota/model errors visible.
   React.useEffect(() => {
     if (!err) return;
+    if (err.toLowerCase().includes('quota') || err.toLowerCase().includes('limit') || err.toLowerCase().includes('key') || err.toLowerCase().includes('model')) return;
     const t = setTimeout(() => setErr(null), 6000);
     return () => clearTimeout(t);
   }, [err]);
@@ -186,19 +194,40 @@ export function App() {
     }
   }
 
+  // ---- stealth mode ----
+  async function toggleStealth() {
+    setErr(null);
+    try {
+      const next = await commands.overlayToggleStealth();
+      setSettings((s) => ({ ...s, contentProtection: next }));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
   // ---- assist ----
+  function cancelAssist() {
+    streamingRef.current = false;
+    setStreaming(false);
+    setAsking(false);
+    setAskingElapsed(0);
+    setErr(null);
+    void commands.assistCancel();
+  }
+
   async function runAssist(preset: string | null, slot?: 'fast' | 'smart') {
     if (streamingRef.current) return;
     setErr(null);
     setAnswer('');
     setStreaming(true);
     setAsking(true);
+    setAskingElapsed(0);
     streamingRef.current = true;
     setActivePreset(preset);
     setPanel('assist');
     setMenuOpen(false);
     const s = settingsRef.current;
-    const needScreenshot = preset === 'screen' || captures.length > 0 || (s.autoAttachScreenshot && !question);
+    const needScreenshot = preset === 'screen' || captures.length > 0;
     try {
       await commands.assistRun({
         question: preset ? '' : question || 'What should I focus on?',
@@ -213,6 +242,7 @@ export function App() {
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
+      setAskingElapsed(0);
       setErr(String(e));
     }
   }
@@ -320,6 +350,16 @@ export function App() {
         <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[15px] ${recording ? 'bg-red-500/25' : 'bg-white/10'}`} title={recording ? (liveStatus === 'reconnecting' ? 'Reconnecting…' : 'Recording') : 'Idle'}>
           {recording ? <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" /> : <span className="text-white/80">✦</span>}
         </div>
+        <button onClick={() => void toggleStealth()}
+          title={settings.contentProtection ? 'Stealth Mode is ACTIVE (hidden from screen share & Dock). Click to deactivate.' : 'Stealth Mode is OFF (visible in screen share & Dock). Click to activate.'}
+          className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${
+            settings.contentProtection
+              ? 'bg-emerald-500/20 border border-emerald-400/35 text-emerald-300 hover:bg-emerald-500/30'
+              : 'bg-amber-500/15 border border-amber-400/30 text-amber-200 hover:bg-amber-500/25'
+          }`}>
+          <span className="text-[12px]">{settings.contentProtection ? '🥷' : '👀'}</span>
+          <span>{settings.contentProtection ? 'Stealth' : 'Visible'}</span>
+        </button>
         <button onClick={() => void commands.overlayHide()} title="Hide overlay (global hotkey brings it back)"
           className="flex items-center gap-1 px-3 py-1 rounded-full text-[13px] text-white/85 hover:bg-white/10">
           <span className="text-white/50 text-[11px]">∨</span> Hide
@@ -352,10 +392,26 @@ export function App() {
                       <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
                       <span>{smartMode ? 'Smart reasoning…' : 'Thinking…'}</span>
                       <span className="text-[11px] text-white/40 tabular-nums">({askingElapsed.toFixed(1)}s)</span>
-                      <button onClick={() => void commands.assistCancel()} className="text-[11px] text-white/50 hover:text-white underline ml-1">Cancel</button>
+                      <button onClick={cancelAssist} className="text-[11px] text-white/75 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded-full ml-1 transition">Cancel</button>
                     </span>
+                  ) : err ? (
+                    <div className="flex flex-col items-center justify-center gap-1.5 py-1 text-center select-text">
+                      <span className="text-amber-400 text-sm font-medium">⚠️ {err.toLowerCase().includes('quota') || err.toLowerCase().includes('limit') ? 'Model Quota Limit' : 'Assist Error'}</span>
+                      <span className="text-[12.5px] text-white/80 max-w-lg leading-relaxed">{err.replace(/^Error:\s*/, '')}</span>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button onClick={() => { setErr(null); void runAssist(null, 'fast'); }} className="px-3 py-1 rounded-lg bg-blue-600/80 hover:bg-blue-600 text-white text-[12px] font-medium shadow">
+                          ⚡ Try Fast Model
+                        </button>
+                        <button onClick={() => setPanel('settings')} className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/90 text-[12px]">
+                          ⚙️ Settings
+                        </button>
+                        <button onClick={() => setErr(null)} className="px-2 py-1 text-white/40 hover:text-white text-[12px]">
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
                   ) : recording ? (
-                    'Listening… ask anything with ⌘/Ctrl+Enter.'
+                    'Listening… ask anything with Enter or ⌘/Ctrl+Enter.'
                   ) : (
                     'Start the meeting or ask a question — answers appear here, invisible to screen share.'
                   )}
@@ -393,9 +449,12 @@ export function App() {
               <div className="rounded-2xl border border-white/12 bg-white/[0.06] px-3.5 pt-2.5 pb-2">
                 <input value={question} onChange={(e) => setQuestion(e.target.value)}
                   onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void runAssist(null);
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void runAssist(null);
+                    }
                   }}
-                  placeholder="Ask about your screen or conversation, or ⌘↵ for Assist"
+                  placeholder="Ask anything… (Press Enter or ⌘↵ to send)"
                   className="w-full bg-transparent outline-none text-[13.5px] text-white/90 placeholder:text-white/40" />
                 <div className="flex items-center gap-1 mt-1.5">
                   <button onClick={() => setSmartMode((v) => !v)} title={smartMode ? 'Smart model (slower, stronger)' : 'Fast model'}
@@ -415,6 +474,10 @@ export function App() {
                           </button>
                         ))}
                         <div className="border-t border-white/10 mt-1 pt-1">
+                          <button onClick={() => { setMenuOpen(false); void toggleStealth(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white flex items-center justify-between">
+                            <span>{settings.contentProtection ? 'Deactivate stealth' : 'Activate stealth'}</span>
+                            <span className="text-[12px]">{settings.contentProtection ? '👀' : '🥷'}</span>
+                          </button>
                           <button onClick={() => { setMenuOpen(false); void beginRegionSelect(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white">⌖ Region screenshot</button>
                           <button onClick={() => { setMenuOpen(false); void toggleMeeting(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white">{recording ? '■ Stop meeting' : '● Start meeting'}</button>
                         </div>
@@ -423,7 +486,7 @@ export function App() {
                   </div>
                   <div className="flex-1" />
                   {asking ? (
-                    <button onClick={() => void commands.assistCancel()} className="text-[12px] text-white/50 hover:text-white/85 px-2">Cancel</button>
+                    <button onClick={cancelAssist} className="text-[12px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2.5 py-1 rounded-full transition">Cancel</button>
                   ) : (
                     captures.length > 0 && <span className="text-[11px] text-white/35">{captures.length} shot{captures.length > 1 ? 's' : ''}</span>
                   )}

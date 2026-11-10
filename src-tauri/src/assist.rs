@@ -1,25 +1,33 @@
 //! Assist: streaming generateContent with transcript + screenshots.
 use crate::gemini;
 use crate::state::{events, AssistRequest, CapturedImage, TranscriptLine};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::watch;
 
-
-static CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+static CANCEL_TX: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
 
 pub fn cancel_current() {
-    if let Ok(guard) = CANCEL.lock() {
-        if let Some(flag) = guard.as_ref() {
-            flag.store(true, Ordering::SeqCst);
+    if let Ok(guard) = CANCEL_TX.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(true);
         }
     }
 }
 
-fn set_cancel(flag: Arc<AtomicBool>) {
-    if let Ok(mut guard) = CANCEL.lock() {
-        *guard = Some(flag);
+fn create_cancel_receiver() -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    if let Ok(mut guard) = CANCEL_TX.lock() {
+        *guard = Some(tx);
     }
+    rx
+}
+
+pub fn emit_all<S: serde::Serialize + Clone>(app: &AppHandle, ev: &str, payload: S) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.emit(ev, payload.clone());
+    }
+    let _ = app.emit(ev, payload);
 }
 
 pub const PROFILES: &[(&str, &str)] = &[
@@ -49,7 +57,7 @@ pub fn preset_question(key: &str) -> Option<String> {
 pub async fn run_assist(
     app: AppHandle,
     api_key: String,
-    model: String,
+    primary_model: String,
     req: AssistRequest,
     transcript: Vec<TranscriptLine>,
     images: Vec<CapturedImage>,
@@ -57,8 +65,7 @@ pub async fn run_assist(
     search_grounding: bool,
 ) -> Result<(), String> {
     cancel_current();
-    let cancel = Arc::new(AtomicBool::new(false));
-    set_cancel(cancel.clone());
+    let mut cancel_rx = create_cancel_receiver();
 
     let system = profile_system(&req.profile_id, &req.custom_instructions.clone().unwrap_or_default());
     let window_text = transcript_window(&transcript, 40);
@@ -73,44 +80,156 @@ pub async fn run_assist(
         body["tools"] = tools;
     }
 
-    let url = gemini::stream_url(&model, &api_key);
-    stream_post(&app, &url, &body, cancel, events::ASSIST_CHUNK, events::ASSIST_DONE).await
+    stream_with_fallbacks(
+        &app,
+        &api_key,
+        &primary_model,
+        &body,
+        &mut cancel_rx,
+        events::ASSIST_CHUNK,
+        events::ASSIST_DONE,
+    )
+    .await
 }
-fn transcript_window(t: &[TranscriptLine], n: usize) -> String { t.iter().rev().take(n).rev().map(|l| format!("[{}] {}", l.speaker, l.text)).collect::<Vec<_>>().join("\n") }
-pub async fn stream_post(app: &AppHandle, url: &str, body: &serde_json::Value, cancel: Arc<AtomicBool>, chunk_ev: &str, done_ev: &str) -> Result<(), String> {
+
+fn transcript_window(t: &[TranscriptLine], n: usize) -> String {
+    t.iter().rev().take(n).rev().map(|l| format!("[{}] {}", l.speaker, l.text)).collect::<Vec<_>>().join("\n")
+}
+
+async fn stream_with_fallbacks(
+    app: &AppHandle,
+    api_key: &str,
+    primary_model: &str,
+    body: &serde_json::Value,
+    cancel_rx: &mut watch::Receiver<bool>,
+    chunk_ev: &str,
+    done_ev: &str,
+) -> Result<(), String> {
+    let mut candidate_models = vec![primary_model.to_string()];
+    for fallback in &["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite-preview"] {
+        if !candidate_models.iter().any(|m| m == fallback) {
+            candidate_models.push(fallback.to_string());
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
-    let mut attempt: u32 = 0;
-    loop {
-        if cancel.load(Ordering::SeqCst) { let _ = app.emit(done_ev, serde_json::json!({"cancelled": true})); return Ok(()); }
-        let resp = client.post(url).json(body).send().await;
-        let resp = match resp { Ok(r) => r, Err(e) => { attempt += 1; if attempt > 2 { return Err(format!("request failed: {e}")); } backoff(attempt).await; continue; } };
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let b = resp.text().await.unwrap_or_default();
-            return Err(format!("quota exceeded (429): {}", trunc(&b)));
+
+    let mut last_err = String::new();
+
+    for (idx, model) in candidate_models.iter().enumerate() {
+        if *cancel_rx.borrow() {
+            emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
+            return Ok(());
         }
-        if !status.is_success() { let b = resp.text().await.unwrap_or_default(); return Err(format!("gemini error {status}: {}", trunc(&b))); }
-        break read_sse(app, resp, &cancel, chunk_ev, done_ev).await;
+
+        let mut req_body = body.clone();
+        if idx > 0 {
+            if let Some(cfg) = req_body.get_mut("generationConfig") {
+                if let Some(obj) = cfg.as_object_mut() {
+                    obj.remove("thinkingConfig");
+                }
+            }
+        }
+
+        let url = gemini::stream_url(model, api_key);
+        let send_fut = client.post(&url).json(&req_body).send();
+
+        let resp = tokio::select! {
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
+                    return Ok(());
+                }
+                continue;
+            }
+            res = send_fut => res,
+        };
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("Connection failed for {model}: {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let b = resp.text().await.unwrap_or_default();
+            last_err = format!("Model {model} ({status}): {}", clean_quota_msg(&b));
+            // Automatically try next candidate in fallback chain
+            continue;
+        }
+
+        // If fallback was activated, inform the user with a subtle hint
+        if idx > 0 {
+            let notice = format!("*[Note: Switched to {model} due to rate limits on {primary_model}]*\n\n");
+            emit_all(app, chunk_ev, serde_json::json!({"text": notice}));
+        }
+
+        return read_sse(app, resp, cancel_rx, chunk_ev, done_ev).await;
+    }
+
+    Err(if last_err.is_empty() {
+        "All model requests failed. Please check your API quota or connection.".to_string()
+    } else {
+        last_err
+    })
+}
+
+fn clean_quota_msg(raw: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(msg) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+            if let Some(first_sentence) = msg.lines().next() {
+                return first_sentence.to_string();
+            }
+            return msg.to_string();
+        }
+    }
+    trunc(raw)
+}
+
+fn trunc(s: &str) -> String {
+    if s.len() > 300 {
+        format!("{}...", &s[..300])
+    } else {
+        s.to_string()
     }
 }
-async fn backoff(a: u32) { tokio::time::sleep(std::time::Duration::from_millis(500 * 2u64.pow(a.min(3)))).await; }
-fn trunc(s: &str) -> String { if s.len() > 400 { format!("{}...", &s[..400]) } else { s.to_string() } }
-async fn read_sse(app: &AppHandle, resp: reqwest::Response, cancel: &Arc<AtomicBool>, chunk_ev: &str, done_ev: &str) -> Result<(), String> {
+
+async fn read_sse(
+    app: &AppHandle,
+    resp: reqwest::Response,
+    cancel_rx: &mut watch::Receiver<bool>,
+    chunk_ev: &str,
+    done_ev: &str,
+) -> Result<(), String> {
     use futures_util::StreamExt;
     let mut buf = String::new();
     let mut stream = resp.bytes_stream();
     let mut received_any = false;
     let mut stream_error: Option<String> = None;
 
-    while let Some(item) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            let _ = app.emit(done_ev, serde_json::json!({"cancelled": true}));
-            return Ok(());
-        }
+    loop {
+        let next_item = tokio::select! {
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
+                    return Ok(());
+                }
+                continue;
+            }
+            item = stream.next() => item,
+        };
+
+        let Some(item) = next_item else {
+            break;
+        };
+
         let bytes = item.map_err(|e| format!("stream read: {e}"))?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
         // Normalize CRLF to LF so both \r\n\r\n and \n\n are handled cleanly
@@ -128,12 +247,13 @@ async fn read_sse(app: &AppHandle, resp: reqwest::Response, cancel: &Arc<AtomicB
                     }
                     for t in gemini::extract_stream_text(d) {
                         received_any = true;
-                        let _ = app.emit(chunk_ev, serde_json::json!({"text": t}));
+                        emit_all(app, chunk_ev, serde_json::json!({"text": t}));
                     }
                 }
             }
         }
     }
+
     // Drain any remaining lines in buffer
     for line in buf.lines() {
         let trimmed = line.trim();
@@ -144,21 +264,24 @@ async fn read_sse(app: &AppHandle, resp: reqwest::Response, cancel: &Arc<AtomicB
             }
             for t in gemini::extract_stream_text(d) {
                 received_any = true;
-                let _ = app.emit(chunk_ev, serde_json::json!({"text": t}));
+                emit_all(app, chunk_ev, serde_json::json!({"text": t}));
             }
         }
     }
+
     if let Some(err) = stream_error {
-        let _ = app.emit(events::ERROR, serde_json::json!({"message": err}));
-        let _ = app.emit(done_ev, serde_json::json!({"error": err}));
+        emit_all(app, events::ERROR, serde_json::json!({"message": err}));
+        emit_all(app, done_ev, serde_json::json!({"error": err}));
         return Ok(());
     }
+
     if !received_any {
         let err_msg = "No response text received from model";
-        let _ = app.emit(events::ERROR, serde_json::json!({"message": err_msg}));
-        let _ = app.emit(done_ev, serde_json::json!({"error": err_msg}));
+        emit_all(app, events::ERROR, serde_json::json!({"message": err_msg}));
+        emit_all(app, done_ev, serde_json::json!({"error": err_msg}));
         return Ok(());
     }
-    let _ = app.emit(done_ev, serde_json::json!({}));
+
+    emit_all(app, done_ev, serde_json::json!({}));
     Ok(())
 }

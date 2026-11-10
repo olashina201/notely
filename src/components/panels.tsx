@@ -145,7 +145,7 @@ export function SettingsPanel({
             onChange={(e) => set('overlayOpacity', Number(e.target.value))} className="flex-1" />
           <span className="text-white/50 w-8 text-right">{Math.round(draft.overlayOpacity * 100)}</span>
         </label>
-        <Toggle label="Hide from screen share" value={draft.contentProtection} onChange={(v) => set('contentProtection', v)} />
+        <Toggle label="Stealth mode (hidden from screen share & Dock)" value={draft.contentProtection} onChange={(v) => set('contentProtection', v)} />
         <Toggle label="Click-through" value={draft.clickThrough} onChange={(v) => set('clickThrough', v)} />
         <Toggle label="Keep screenshots" value={draft.saveCaptures} onChange={(v) => set('saveCaptures', v)} />
         <Toggle label="Auto-attach screenshot" value={draft.autoAttachScreenshot} onChange={(v) => set('autoAttachScreenshot', v)} />

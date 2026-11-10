@@ -33,6 +33,8 @@ export const commands = {
   overlayHide: () => invoke<void>('overlay_hide'),
   overlayShow: () => invoke<void>('overlay_show'),
   overlayToggleClickthrough: () => invoke<boolean>('overlay_toggle_clickthrough'),
+  overlayToggleStealth: () => invoke<boolean>('overlay_toggle_stealth'),
+  overlaySetStealth: (enabled: boolean) => invoke<boolean>('overlay_set_stealth', { enabled }),
   registerHotkeys: (hotkeys: Record<string, string>) => invoke<void>('register_hotkeys_cmd', { hotkeys }),
 };
 
@@ -46,6 +48,8 @@ export const events = {
   onAssistDone: (cb: (d: { cancelled?: boolean; error?: string }) => void) =>
     listen<{ cancelled?: boolean; error?: string }>('assist.done', (e) => cb(e.payload)),
   onError: (cb: (e: { message: string }) => void) => listen<{ message: string }>('error', (e) => cb(e.payload)),
+  onStealthChanged: (cb: (payload: { stealth: boolean }) => void) =>
+    listen<{ stealth: boolean }>('stealth.changed', (e) => cb(e.payload)),
   onHotkeyAssist: (cb: () => void) => listen('hotkey.assist', () => cb()),
   onHotkeyRegion: (cb: () => void) => listen('hotkey.capture_region', () => cb()),
   onHotkeyPreset: (cb: (p: { preset: string }) => void) => listen<{ preset: string }>('hotkey.preset', (e) => cb(e.payload)),

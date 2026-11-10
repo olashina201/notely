@@ -36,6 +36,11 @@ fn apply_window_prefs(app: &AppHandle, s: &Settings) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.set_content_protected(s.content_protection);
         let _ = w.set_ignore_cursor_events(s.click_through).map_err(|_| ());
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::ActivationPolicy;
+            let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+        }
     }
 }
 pub(crate) fn resolve_key(app: &AppHandle) -> Result<String, String> {
@@ -194,6 +199,7 @@ pub async fn selector_end(app: AppHandle, saved: Option<serde_json::Value>) -> R
     }
     let _ = win.set_always_on_top(true);
     let _ = win.set_visible_on_all_workspaces(true);
+    crate::make_window_always_on_top(&win);
     Ok(())
 }
 #[tauri::command]
@@ -326,8 +332,8 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
         }
         let recent: Vec<CapturedImage> = images.into_iter().rev().take(4).rev().collect();
         if let Err(e) = assist::run_assist(app2.clone(), key, model, req, transcript, recent, s.thinking_level.clone(), s.search_grounding).await {
-            let _ = app2.emit(events::ERROR, serde_json::json!({"message": e}));
-            let _ = app2.emit(events::ASSIST_DONE, serde_json::json!({"error": e}));
+            assist::emit_all(&app2, events::ERROR, serde_json::json!({"message": e}));
+            assist::emit_all(&app2, events::ASSIST_DONE, serde_json::json!({"error": e}));
         }
     });
     Ok(())
@@ -365,7 +371,13 @@ pub async fn overlay_hide(app: AppHandle) -> Result<(), String> {
 }
 #[tauri::command]
 pub async fn overlay_show(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("overlay") { w.show().map_err(|e| e.to_string())?; w.set_focus().map_err(|e| e.to_string())?; }
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.show();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_visible_on_all_workspaces(true);
+        crate::make_window_always_on_top(&w);
+        let _ = w.set_focus();
+    }
     Ok(())
 }
 #[tauri::command]
@@ -375,6 +387,46 @@ pub async fn overlay_toggle_clickthrough(app: AppHandle) -> Result<bool, String>
     app.state::<settings::SettingsStore>().modify(|x| x.click_through = next);
     if let Some(w) = app.get_webview_window("overlay") { w.set_ignore_cursor_events(next).map_err(|e| e.to_string())?; }
     Ok(next)
+}
+#[tauri::command]
+pub async fn overlay_toggle_stealth(app: AppHandle) -> Result<bool, String> {
+    let s = app.state::<settings::SettingsStore>().get();
+    let next = !s.content_protection;
+    app.state::<settings::SettingsStore>().modify(|x| x.content_protection = next);
+    let updated = app.state::<settings::SettingsStore>().get();
+    let _ = settings::save_settings(&app, &updated);
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.set_content_protected(next);
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_visible_on_all_workspaces(true);
+        crate::make_window_always_on_top(&w);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
+    let _ = app.emit(events::STEALTH_CHANGED, serde_json::json!({ "stealth": next }));
+    Ok(next)
+}
+#[tauri::command]
+pub async fn overlay_set_stealth(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    app.state::<settings::SettingsStore>().modify(|x| x.content_protection = enabled);
+    let updated = app.state::<settings::SettingsStore>().get();
+    let _ = settings::save_settings(&app, &updated);
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.set_content_protected(enabled);
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_visible_on_all_workspaces(true);
+        crate::make_window_always_on_top(&w);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
+    let _ = app.emit(events::STEALTH_CHANGED, serde_json::json!({ "stealth": enabled }));
+    Ok(enabled)
 }
 #[tauri::command]
 pub async fn register_hotkeys_cmd(app: AppHandle, hotkeys: std::collections::HashMap<String, String>) -> Result<(), String> {
