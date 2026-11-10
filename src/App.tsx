@@ -177,7 +177,18 @@ export function App() {
     events.onHotkeyRegion(() => {
       void beginRegionSelect();
     }).then((u) => subs.push(u));
-    return () => subs.forEach((u) => u());
+
+    // Automatically focus the input field so users can type immediately
+    inputRef.current?.focus();
+    const handleWinFocus = () => {
+      inputRef.current?.focus();
+    };
+    window.addEventListener('focus', handleWinFocus);
+
+    return () => {
+      subs.forEach((u) => u());
+      window.removeEventListener('focus', handleWinFocus);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

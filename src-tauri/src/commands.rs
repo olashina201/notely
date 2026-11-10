@@ -382,10 +382,21 @@ pub async fn overlay_hide(app: AppHandle) -> Result<(), String> {
 pub async fn overlay_show(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.show();
-        let _ = w.set_always_on_top(true);
-        let _ = w.set_visible_on_all_workspaces(true);
         crate::make_window_always_on_top(&w);
         let _ = w.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(ptr) = w.ns_window() {
+                if !ptr.is_null() {
+                    let ptr_val = ptr as usize;
+                    let _ = w.app_handle().run_on_main_thread(move || {
+                        unsafe {
+                            crate::notely_focus_window(ptr_val as *mut std::ffi::c_void);
+                        }
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -406,8 +417,6 @@ pub async fn overlay_toggle_stealth(app: AppHandle) -> Result<bool, String> {
     let _ = settings::save_settings(&app, &updated);
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.set_content_protected(next);
-        let _ = w.set_always_on_top(true);
-        let _ = w.set_visible_on_all_workspaces(true);
         crate::make_window_always_on_top(&w);
     }
     #[cfg(target_os = "macos")]
@@ -425,8 +434,6 @@ pub async fn overlay_set_stealth(app: AppHandle, enabled: bool) -> Result<bool, 
     let _ = settings::save_settings(&app, &updated);
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.set_content_protected(enabled);
-        let _ = w.set_always_on_top(true);
-        let _ = w.set_visible_on_all_workspaces(true);
         crate::make_window_always_on_top(&w);
     }
     #[cfg(target_os = "macos")]
@@ -443,26 +450,16 @@ pub async fn overlay_focus(app: AppHandle) -> Result<(), String> {
         let _ = w.set_focus();
         #[cfg(target_os = "macos")]
         {
-            use std::ffi::{c_char, c_void};
-            extern "C" {
-                fn objc_getClass(name: *const c_char) -> *mut c_void;
-                fn sel_registerName(name: *const c_char) -> *const c_void;
-                fn objc_msgSend();
-            }
-            type MsgSendBool = unsafe extern "C" fn(*mut c_void, *const c_void, i32);
-            let _ = w.app_handle().run_on_main_thread(move || {
-                unsafe {
-                    let cls_app = objc_getClass(b"NSApplication\0".as_ptr() as *const c_char);
-                    let sel_shared = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
-                    let get_app: unsafe extern "C" fn(*mut c_void, *const c_void) -> *mut c_void = std::mem::transmute(objc_msgSend as *const ());
-                    let ns_app = get_app(cls_app, sel_shared);
-                    if !ns_app.is_null() {
-                        let sel_activate = sel_registerName(b"activateIgnoringOtherApps:\0".as_ptr() as *const c_char);
-                        let activate: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
-                        activate(ns_app, sel_activate, 1i32);
-                    }
+            if let Ok(ptr) = w.ns_window() {
+                if !ptr.is_null() {
+                    let ptr_val = ptr as usize;
+                    let _ = w.app_handle().run_on_main_thread(move || {
+                        unsafe {
+                            crate::notely_focus_window(ptr_val as *mut std::ffi::c_void);
+                        }
+                    });
                 }
-            });
+            }
         }
     }
     Ok(())

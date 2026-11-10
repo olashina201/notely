@@ -18,80 +18,35 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(target_os = "macos")]
+extern "C" {
+    pub fn notely_pre_init();
+    pub fn notely_setup_window(win: *mut std::ffi::c_void);
+    pub fn notely_focus_window(win: *mut std::ffi::c_void);
+}
+
+#[cfg(target_os = "macos")]
 pub fn make_window_always_on_top(w: &tauri::WebviewWindow) {
-    let app = w.app_handle().clone();
-    let app2 = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app2.get_webview_window("overlay") {
-            apply_macos_window_levels(&win);
+    let win = w.clone();
+    let _ = w.app_handle().run_on_main_thread(move || {
+        match win.ns_window() {
+            Ok(ptr) => {
+                crate::assist::nlog(&format!("make_window_always_on_top: ptr={:?}", ptr));
+                if !ptr.is_null() {
+                    unsafe {
+                        notely_setup_window(ptr);
+                    }
+                }
+            }
+            Err(e) => {
+                crate::assist::nlog(&format!("make_window_always_on_top error: {:?}", e));
+            }
         }
     });
 }
 
 #[cfg(target_os = "macos")]
-unsafe extern "C" fn yes_imp(_this: *mut std::ffi::c_void, _cmd: *const std::ffi::c_void) -> i8 {
-    1
-}
-
-#[cfg(target_os = "macos")]
 pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
-    use std::ffi::{c_char, c_void};
-
-    extern "C" {
-        fn object_getClass(obj: *mut c_void) -> *mut c_void;
-        fn class_replaceMethod(cls: *mut c_void, name: *const c_void, imp: unsafe extern "C" fn(*mut c_void, *const c_void) -> i8, types: *const c_char) -> *mut c_void;
-        fn sel_registerName(name: *const c_char) -> *const c_void;
-        fn objc_msgSend();
-    }
-
-    type MsgSendLevel = unsafe extern "C" fn(*mut c_void, *const c_void, i64);
-    type MsgSendBehavior = unsafe extern "C" fn(*mut c_void, *const c_void, usize);
-    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *const c_void, i32);
-    type MsgSendVoid = unsafe extern "C" fn(*mut c_void, *const c_void);
-
-    if let Ok(ptr) = w.ns_window() {
-        if !ptr.is_null() {
-            unsafe {
-                // Ensure the window class allows key & main window focus so input fields accept typing.
-                let cls = object_getClass(ptr);
-                if !cls.is_null() {
-                    let sel_can_become_key = sel_registerName(b"canBecomeKeyWindow\0".as_ptr() as *const c_char);
-                    let sel_can_become_main = sel_registerName(b"canBecomeMainWindow\0".as_ptr() as *const c_char);
-                    let types = b"c@:\0".as_ptr() as *const c_char;
-                    class_replaceMethod(cls, sel_can_become_key, yes_imp, types);
-                    class_replaceMethod(cls, sel_can_become_main, yes_imp, types);
-                }
-
-                // 1. Level 1000 (kCGScreenSaverWindowLevel / NSWindowLevel(kCGScreenSaverWindowLevelKey))
-                // Essential on macOS: Standard .floating (3) or .popUpMenu (101) sit BELOW native fullscreen spaces.
-                // Level 1000 sits ABOVE native fullscreen spaces (Antigravity IDE, Google Chrome, etc.).
-                let sel_set_level = sel_registerName(b"setLevel:\0".as_ptr() as *const c_char);
-                let set_level: MsgSendLevel = std::mem::transmute(objc_msgSend as *const ());
-                set_level(ptr, sel_set_level, 1000i64);
-
-                // 2. Set collection behavior:
-                // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0 (1)
-                // NSWindowCollectionBehaviorIgnoresCycle = 1 << 6 (64)
-                // NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 (256)
-                // NSWindowCollectionBehaviorCanJoinAllApplications = 1 << 18 (262144)
-                // Total = 1 | 64 | 256 | 262144 = 262465 (0x40141).
-                let behavior: usize = (1 << 0) | (1 << 6) | (1 << 8) | (1 << 18);
-                let sel_set_behavior = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
-                let set_behavior: MsgSendBehavior = std::mem::transmute(objc_msgSend as *const ());
-                set_behavior(ptr, sel_set_behavior, behavior);
-
-                // 3. Do NOT hide when user switches to or clicks another app
-                let sel_set_hides = sel_registerName(b"setHidesOnDeactivate:\0".as_ptr() as *const c_char);
-                let set_hides: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
-                set_hides(ptr, sel_set_hides, 0i32); // NO / false
-
-                // 4. orderFrontRegardless brings it in front across all spaces and apps
-                let sel_order_front = sel_registerName(b"orderFrontRegardless\0".as_ptr() as *const c_char);
-                let order_front: MsgSendVoid = std::mem::transmute(objc_msgSend as *const ());
-                order_front(ptr, sel_order_front);
-            }
-        }
-    }
+    make_window_always_on_top(w);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -100,24 +55,8 @@ pub fn make_window_always_on_top(_w: &tauri::WebviewWindow) {}
 fn main() {
     #[cfg(target_os = "macos")]
     unsafe {
-        use std::ffi::{c_char, c_void};
-        extern "C" {
-            fn objc_getClass(name: *const c_char) -> *mut c_void;
-            fn sel_registerName(name: *const c_char) -> *const c_void;
-            fn objc_msgSend();
-        }
-        type MsgSendGetApp = unsafe extern "C" fn(*mut c_void, *const c_void) -> *mut c_void;
-        type MsgSendSetPolicy = unsafe extern "C" fn(*mut c_void, *const c_void, i64) -> i8;
-
-        let ns_app_cls = objc_getClass(b"NSApplication\0".as_ptr() as *const c_char);
-        let sel_shared_app = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
-        let shared_app: MsgSendGetApp = std::mem::transmute(objc_msgSend as *const ());
-        let app_inst = shared_app(ns_app_cls, sel_shared_app);
-
-        // Pre-configure Accessory activation policy before any windows are created by Tauri
-        let sel_set_policy = sel_registerName(b"setActivationPolicy:\0".as_ptr() as *const c_char);
-        let set_policy: MsgSendSetPolicy = std::mem::transmute(objc_msgSend as *const ());
-        set_policy(app_inst, sel_set_policy, 1); // 1 = NSApplicationActivationPolicyAccessory
+        crate::assist::nlog("Calling notely_pre_init...");
+        notely_pre_init();
     }
 
     tauri::Builder::default()
@@ -132,7 +71,6 @@ fn main() {
             if let Some(w) = handle.get_webview_window("overlay") {
                 let _ = w.set_content_protected(loaded.content_protection);
                 let _ = w.set_ignore_cursor_events(loaded.click_through);
-                let _ = w.set_always_on_top(true);
                 make_window_always_on_top(&w);
                 #[cfg(target_os = "macos")]
                 {
@@ -140,24 +78,6 @@ fn main() {
                     let _ = app.set_activation_policy(ActivationPolicy::Accessory);
                 }
             }
-
-            // Continuous float monitor: ensures Notely stays pinned on top even when other apps
-            // expand, maximize, open modal dialogs, or transition to fullscreen Spaces.
-            let monitor_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
-                loop {
-                    interval.tick().await;
-                    let h = monitor_handle.clone();
-                    let h2 = monitor_handle.clone();
-                    let _ = h.run_on_main_thread(move || {
-                        if let Some(w) = h2.get_webview_window("overlay") {
-                            #[cfg(target_os = "macos")]
-                            apply_macos_window_levels(&w);
-                        }
-                    });
-                }
-            });
             register_hotkeys(&handle, &loaded.hotkeys);
 
             // System tray icon: gives users a permanent recovery path to show/hide

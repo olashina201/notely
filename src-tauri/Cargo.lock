@@ -3078,6 +3078,7 @@ dependencies = [
  "audioadapter",
  "audioadapter-buffers",
  "base64 0.22.1",
+ "cc",
  "chrono",
  "cpal",
  "futures-util",
