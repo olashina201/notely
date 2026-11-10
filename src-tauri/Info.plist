@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Notely transcribes your meetings live to power the stealth assistant.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Notely captures screen regions you select to answer questions about them.</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

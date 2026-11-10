@@ -1,0 +1,44 @@
+[package]
+name = "notely"
+version = "0.1.0"
+description = "Notely — personal stealth meeting assistant (Tauri 2 + Gemini, local-only)"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+cpal = "0.15"
+rubato = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+xcap = "0.9"
+image = "0.25"
+base64 = { version = "0.22", features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+thiserror = "2"
+audioadapter = "5"
+audioadapter-buffers = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+wasapi = "0.27"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native-sync-persistent"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
