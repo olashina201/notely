@@ -62,21 +62,20 @@ pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
                     class_replaceMethod(cls, sel_can_become_main, yes_imp, types);
                 }
 
-                // 1. Level 101 (NSPopUpMenuWindowLevel / kCGPopUpMenuWindowLevel)
-                // Ensures it floats directly above all normal, modal, maximized, and full-screen windows
-                // across all applications (Google Chrome, Antigravity IDE, Slack, etc.).
+                // 1. Level 1000 (kCGScreenSaverWindowLevel / NSWindowLevel(kCGScreenSaverWindowLevelKey))
+                // Essential on macOS: Standard .floating (3) or .popUpMenu (101) sit BELOW native fullscreen spaces.
+                // Level 1000 sits ABOVE native fullscreen spaces (Antigravity IDE, Google Chrome, etc.).
                 let sel_set_level = sel_registerName(b"setLevel:\0".as_ptr() as *const c_char);
                 let set_level: MsgSendLevel = std::mem::transmute(objc_msgSend as *const ());
-                set_level(ptr, sel_set_level, 101i64);
+                set_level(ptr, sel_set_level, 1000i64);
 
                 // 2. Set collection behavior:
-                // NSWindowCollectionBehaviorMoveToActiveSpace = 1 << 1 (2)
+                // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0 (1)
                 // NSWindowCollectionBehaviorIgnoresCycle = 1 << 6 (64)
                 // NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 (256)
-                // Total = 2 | 64 | 256 = 322.
-                // NOTE: MoveToActiveSpace enables Notely to follow the user into any fullscreen space
-                // (e.g. Antigravity IDE, Google Chrome, etc.) and float on top.
-                let behavior: usize = (1 << 1) | (1 << 6) | (1 << 8);
+                // NSWindowCollectionBehaviorCanJoinAllApplications = 1 << 18 (262144)
+                // Total = 1 | 64 | 256 | 262144 = 262465 (0x40141).
+                let behavior: usize = (1 << 0) | (1 << 6) | (1 << 8) | (1 << 18);
                 let sel_set_behavior = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
                 let set_behavior: MsgSendBehavior = std::mem::transmute(objc_msgSend as *const ());
                 set_behavior(ptr, sel_set_behavior, behavior);
@@ -99,6 +98,28 @@ pub fn apply_macos_window_levels(w: &tauri::WebviewWindow) {
 pub fn make_window_always_on_top(_w: &tauri::WebviewWindow) {}
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use std::ffi::{c_char, c_void};
+        extern "C" {
+            fn objc_getClass(name: *const c_char) -> *mut c_void;
+            fn sel_registerName(name: *const c_char) -> *const c_void;
+            fn objc_msgSend();
+        }
+        type MsgSendGetApp = unsafe extern "C" fn(*mut c_void, *const c_void) -> *mut c_void;
+        type MsgSendSetPolicy = unsafe extern "C" fn(*mut c_void, *const c_void, i64) -> i8;
+
+        let ns_app_cls = objc_getClass(b"NSApplication\0".as_ptr() as *const c_char);
+        let sel_shared_app = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
+        let shared_app: MsgSendGetApp = std::mem::transmute(objc_msgSend as *const ());
+        let app_inst = shared_app(ns_app_cls, sel_shared_app);
+
+        // Pre-configure Accessory activation policy before any windows are created by Tauri
+        let sel_set_policy = sel_registerName(b"setActivationPolicy:\0".as_ptr() as *const c_char);
+        let set_policy: MsgSendSetPolicy = std::mem::transmute(objc_msgSend as *const ());
+        set_policy(app_inst, sel_set_policy, 1); // 1 = NSApplicationActivationPolicyAccessory
+    }
+
     tauri::Builder::default()
         .manage(SettingsStore(std::sync::Mutex::new(state::Settings::default())))
         .manage(MeetingState(std::sync::Mutex::new(Default::default())))

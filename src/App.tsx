@@ -145,10 +145,12 @@ export function App() {
     events.onTranscriptStatus((s) => setLiveStatus(s.status)).then((u) => subs.push(u));
     events.onCaptureTaken((img) => setCaptures((c) => [...c, img].slice(-4))).then((u) => subs.push(u));
     events.onAssistChunk((c) => {
+      console.log('[App] onAssistChunk received chunk len:', c.text.length);
       setAnswer((a) => a + c.text);
       setAsking(false);
     }).then((u) => subs.push(u));
     events.onAssistDone((d) => {
+      console.log('[App] onAssistDone received:', d);
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
@@ -156,6 +158,7 @@ export function App() {
       if (d.error) setErr(d.error);
     }).then((u) => subs.push(u));
     events.onError((e) => {
+      console.error('[App] onError received:', e.message);
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
@@ -232,7 +235,11 @@ export function App() {
   }
 
   async function runAssist(preset: string | null, slot?: 'fast' | 'smart') {
-    if (streamingRef.current) return;
+    if (streamingRef.current) {
+      try { await commands.assistCancel(); } catch {}
+    }
+    const currentQ = preset ? '' : question || 'What should I focus on?';
+    console.log('[App] runAssist starting:', currentQ);
     setErr(null);
     setAnswer('');
     setStreaming(true);
@@ -246,7 +253,7 @@ export function App() {
     const needScreenshot = preset === 'screen' || captures.length > 0;
     try {
       await commands.assistRun({
-        question: preset ? '' : question || 'What should I focus on?',
+        question: currentQ,
         preset,
         includeScreenshot: needScreenshot,
         profileId: s.instructionProfile,
@@ -255,6 +262,7 @@ export function App() {
       });
       if (!preset) setQuestion('');
     } catch (e) {
+      console.error('[App] assistRun invocation error:', e);
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);

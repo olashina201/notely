@@ -3,7 +3,7 @@ use crate::gemini;
 use crate::state::{events, AssistRequest, CapturedImage, TranscriptLine};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Notify;
 
 struct CancelHandle {
@@ -34,7 +34,20 @@ fn create_cancel_handle() -> (Arc<AtomicBool>, Arc<Notify>) {
     (flag, notify)
 }
 
+pub fn nlog(msg: &str) {
+    use std::io::Write;
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    let line = format!("[{ts}] {msg}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/notely.log") {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprintln!("{line}");
+}
+
 pub fn emit_all<S: serde::Serialize + Clone>(app: &AppHandle, ev: &str, payload: S) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.emit(ev, payload.clone());
+    }
     let _ = app.emit(ev, payload);
 }
 
@@ -147,13 +160,13 @@ async fn stream_with_fallbacks(
         }
 
         let url = gemini::stream_url(model, api_key);
-        eprintln!("[assist] Sending stream request to model '{model}' (candidate {idx})...");
+        nlog(&format!("Sending stream request to '{model}' (candidate {idx})..."));
         let send_fut = client.post(&url).json(&req_body).send();
 
         let resp = tokio::select! {
             _ = cancel_notify.notified() => {
                 if cancel_flag.load(Ordering::SeqCst) {
-                    eprintln!("[assist] Request cancelled by user during connect");
+                    nlog("Request cancelled by user during connect");
                     emit_all(app, done_ev, serde_json::json!({"cancelled": true}));
                     return Ok(());
                 }
@@ -165,17 +178,17 @@ async fn stream_with_fallbacks(
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[assist] Connection error for {model}: {e}");
+                nlog(&format!("Connection error for {model}: {e}"));
                 last_err = format!("Connection failed for {model}: {e}");
                 continue;
             }
         };
 
         let status = resp.status();
-        eprintln!("[assist] Model '{model}' responded with HTTP {status}");
+        nlog(&format!("Model '{model}' responded with HTTP {status}"));
         if !status.is_success() {
             let b = resp.text().await.unwrap_or_default();
-            eprintln!("[assist] Error body from {model}: {b}");
+            nlog(&format!("Error body from {model}: {b}"));
             last_err = format!("Model {model} ({status}): {}", clean_quota_msg(&b));
             // Automatically try next candidate in fallback chain
             continue;
@@ -190,7 +203,7 @@ async fn stream_with_fallbacks(
         return read_sse(app, resp, cancel_flag, cancel_notify, chunk_ev, done_ev).await;
     }
 
-    eprintln!("[assist] All candidate models failed. Last error: {last_err}");
+    nlog(&format!("All candidate models failed. Last error: {last_err}"));
     Err(if last_err.is_empty() {
         "All model requests failed. Please check your API quota or connection.".to_string()
     } else {
@@ -273,7 +286,7 @@ async fn read_sse(
                     }
                     for t in gemini::extract_stream_text(d) {
                         received_any = true;
-                        eprintln!("[assist] Emitting chunk: {:?}", t);
+                        nlog(&format!("Chunk received: len={}, text={:?}", t.len(), t));
                         emit_all(app, chunk_ev, serde_json::json!({"text": t}));
                     }
                 }
@@ -297,7 +310,7 @@ async fn read_sse(
     }
 
     if let Some(err) = stream_error {
-        eprintln!("[assist] Stream error encountered: {err}");
+        nlog(&format!("Stream error encountered: {err}"));
         emit_all(app, events::ERROR, serde_json::json!({"message": err}));
         emit_all(app, done_ev, serde_json::json!({"error": err}));
         return Ok(());
@@ -305,13 +318,13 @@ async fn read_sse(
 
     if !received_any {
         let err_msg = "No response text received from model";
-        eprintln!("[assist] {err_msg}");
+        nlog(&format!("Error: {err_msg}"));
         emit_all(app, events::ERROR, serde_json::json!({"message": err_msg}));
         emit_all(app, done_ev, serde_json::json!({"error": err_msg}));
         return Ok(());
     }
 
-    eprintln!("[assist] Streaming completed successfully.");
+    nlog("Streaming completed successfully. Emitting ASSIST_DONE.");
     emit_all(app, done_ev, serde_json::json!({}));
     Ok(())
 }

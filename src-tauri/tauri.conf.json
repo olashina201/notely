@@ -29,7 +29,8 @@
         "contentProtected": true,
         "center": true,
         "acceptFirstMouse": true,
-        "visibleOnAllWorkspaces": false
+        "visibleOnAllWorkspaces": false,
+        "devtools": true
       }
     ],
     "security": {

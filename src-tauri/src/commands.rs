@@ -312,10 +312,17 @@ pub async fn notes_generate(app: AppHandle, store: State<'_, settings::SettingsS
 }
 #[tauri::command]
 pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>, req: AssistRequest) -> Result<(), String> {
-    let key = resolve_key(&app)?;
+    assist::nlog(&format!("assist_run called: question='{}', slot='{}'", req.question, req.slot));
+    let key = match resolve_key(&app) {
+        Ok(k) => k,
+        Err(e) => {
+            assist::nlog(&format!("resolve_key error: {e}"));
+            return Err(e);
+        }
+    };
     let s = store.get();
     let model = if req.slot == "smart" { s.smart_model.clone() } else { s.fast_model.clone() };
-    eprintln!("[assist_run] received request: slot={}, question='{}', model='{}'", req.slot, req.question, model);
+    assist::nlog(&format!("using model='{}', key_len={}", model, key.len()));
     let (transcript, existing_imgs) = {
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
         (m.transcript.clone(), m.captures.clone())
@@ -333,7 +340,7 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
         }
         let recent: Vec<CapturedImage> = images.into_iter().rev().take(4).rev().collect();
         if let Err(e) = assist::run_assist(app2.clone(), key, model, req, transcript, recent, s.thinking_level.clone(), s.search_grounding).await {
-            eprintln!("[assist_run] assist failed: {e}");
+            assist::nlog(&format!("assist_run background error: {e}"));
             assist::emit_all(&app2, events::ERROR, serde_json::json!({"message": e}));
             assist::emit_all(&app2, events::ASSIST_DONE, serde_json::json!({"error": e}));
         }
