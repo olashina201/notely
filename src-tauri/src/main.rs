@@ -1,13 +1,16 @@
-//! Notely — stealth meeting overlay. All Gemini calls happen here in Rust.
-//! The webview is UI-only; the API key never leaves this process.
+//! Notely meeting overlay. All provider API requests happen in Rust.
+//! Credentials are accepted for storage and never returned to the webview.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod assist;
 mod audio;
 mod commands;
 mod db;
+mod diagnostics;
 mod gemini;
 mod live;
 mod notes;
+mod overlay;
+mod providers;
 mod settings;
 mod state;
 mod vision;
@@ -15,7 +18,7 @@ use commands::MeetingState;
 use settings::SettingsStore;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -65,8 +68,13 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
+            if let Err(error) = diagnostics::init(&handle) {
+                eprintln!("[notely] Diagnostics initialization failed: {error}");
+            }
             // Load persisted settings, apply window prefs.
-            let loaded = settings::load_settings(&handle);
+            let mut loaded = settings::load_settings(&handle);
+            // Click-through is temporary; never start with an unclickable overlay.
+            loaded.click_through = false;
             handle.state::<SettingsStore>().update(loaded.clone());
             if let Some(w) = handle.get_webview_window("overlay") {
                 let _ = w.set_content_protected(loaded.content_protection);
@@ -101,28 +109,10 @@ fn main() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
-                        "show" => {
-                            if let Some(w) = app.get_webview_window("overlay") {
-                                let _ = w.show();
-                                let _ = w.set_always_on_top(true);
-                                make_window_always_on_top(&w);
-                                let _ = w.set_focus();
-                            }
-                        }
-                        "hide" => {
-                            if let Some(w) = app.get_webview_window("overlay") {
-                                let _ = w.hide();
-                            }
-                        }
-                        "toggle_clickthrough" => {
-                            let store = app.state::<SettingsStore>();
-                            let next = !store.get().click_through;
-                            store.modify(|s| s.click_through = next);
-                            if let Some(w) = app.get_webview_window("overlay") {
-                                let _ = w.set_ignore_cursor_events(next);
-                            }
-                        }
-                        "toggle_stealth" => {
+                        "show" => { let _ = overlay::set_hidden(app, false); }
+                        "hide" => { let _ = overlay::set_hidden(app, true); }
+                        "toggle_clickthrough" => { let _ = overlay::toggle_clickthrough(app); }
+        "toggle_stealth" => {
                             let store = app.state::<SettingsStore>();
                             let next = !store.get().content_protection;
                             store.modify(|s| s.content_protection = next);
@@ -143,37 +133,30 @@ fn main() {
                         _ => {}
                     }
                 })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("overlay") {
-                            if w.is_visible().unwrap_or(false) {
-                                let _ = w.hide();
-                            } else {
-                                let _ = w.show();
-                                let _ = w.set_always_on_top(true);
-                                let _ = w.set_visible_on_all_workspaces(true);
-                                make_window_always_on_top(&w);
-                                let _ = w.set_focus();
-                            }
-                        }
-                    }
-                })
                 .build(app)?;
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = overlay::set_hidden(window.app_handle(), true);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            diagnostics::diagnostics_recent, diagnostics::diagnostics_clear, diagnostics::diagnostics_frontend, diagnostics::diagnostics_probe,
             commands::settings_get, commands::settings_set,
             commands::key_has, commands::key_set, commands::key_clear, commands::key_test,
             commands::models_list,
+            commands::screen_permission_get, commands::screen_permission_request, commands::screen_permission_open_settings,
             commands::capture_full_cmd, commands::capture_active_cmd, commands::capture_region_cmd, commands::capture_clear, commands::monitors_list,
             commands::selector_begin, commands::selector_end,
             commands::meeting_start, commands::meeting_stop, commands::meeting_transcript_add,
             commands::assist_run, commands::assist_cancel,
             commands::notes_generate,
             commands::history_list, commands::history_search, commands::history_get, commands::history_delete,
-            commands::overlay_hide, commands::overlay_show, commands::overlay_toggle_clickthrough,
+            commands::chats_list, commands::chats_get, commands::chats_delete,
+            commands::overlay_hide, commands::overlay_show, commands::overlay_toggle_clickthrough, commands::overlay_interactive,
             commands::overlay_toggle_stealth, commands::overlay_set_stealth, commands::overlay_focus,
             commands::register_hotkeys_cmd,
         ])
@@ -185,7 +168,7 @@ pub(crate) fn register_hotkeys(app: &AppHandle, hotkeys: &std::collections::Hash
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     let actions: &[(&str, &str)] = &[
-        ("assist", "assist"), ("toggleStealth", "toggle_stealth"),
+        ("focusChat", "focus_chat"), ("assist", "assist"), ("toggleStealth", "toggle_stealth"),
         ("captureFull", "capture_full"), ("captureRegion", "capture_region"),
         ("panicHide", "panic_hide"), ("toggleClickThrough", "toggle_clickthrough"),
         ("say", "preset:say"), ("followup", "preset:followup"), ("recap", "preset:recap"), ("screen", "preset:screen"),
@@ -218,24 +201,11 @@ pub(crate) fn register_hotkeys(app: &AppHandle, hotkeys: &std::collections::Hash
 fn handle_hotkey(app: &AppHandle, tag: &str) {
     match tag {
         // Toggle: the global shortcut still fires while hidden, so this is recoverable.
-        "panic_hide" => {
-            if let Some(w) = app.get_webview_window("overlay") {
-                if w.is_visible().unwrap_or(true) {
-                    let _ = w.hide();
-                } else {
-                    let _ = w.show();
-                    let _ = w.set_always_on_top(true);
-                    let _ = w.set_visible_on_all_workspaces(true);
-                    make_window_always_on_top(&w);
-                    let _ = w.set_focus();
-                }
-            }
-        }
+        "panic_hide" => { let _ = overlay::toggle(app); }
         "toggle_clickthrough" => {
-            let store = app.state::<SettingsStore>();
-            let next = !store.get().click_through;
-            store.modify(|s| s.click_through = next);
-            if let Some(w) = app.get_webview_window("overlay") { let _ = w.set_ignore_cursor_events(next); }
+            if let Err(error) = overlay::toggle_clickthrough(app) {
+                let _ = app.emit(state::events::ERROR, serde_json::json!({"message": error}));
+            }
         }
         "toggle_stealth" => {
             let store = app.state::<SettingsStore>();
@@ -255,17 +225,24 @@ fn handle_hotkey(app: &AppHandle, tag: &str) {
         "capture_full" => {
             let a = app.clone();
             tauri::async_runtime::spawn(async move {
-                match vision::capture_full(None) {
+                match commands::capture_with_timeout(|| vision::capture_full(None)).await {
                     Ok(img) => { push_hotkey_capture(&a, img); }
                     Err(e) => { let _ = a.emit(state::events::ERROR, serde_json::json!({"message": e})); }
                 }
             });
         }
-        "assist" => { let _ = app.emit("hotkey.assist", ()); }
-        "capture_region" => { let _ = app.emit("hotkey.capture_region", ()); }
+        "focus_chat" => {
+            if let Err(error) = overlay::set_hidden(app, false) {
+                let _ = app.emit(state::events::ERROR, serde_json::json!({"message": error}));
+            } else {
+                let _ = app.emit("hotkey:focus_chat", ());
+            }
+        }
+        "assist" => { let _ = app.emit("hotkey:assist", ()); }
+        "capture_region" => { let _ = app.emit("hotkey:capture_region", ()); }
         t if t.starts_with("preset:") => {
             let preset = t.trim_start_matches("preset:").to_string();
-            let _ = app.emit("hotkey.preset", serde_json::json!({"preset": preset}));
+            let _ = app.emit("hotkey:preset", serde_json::json!({"preset": preset}));
         }
         _ => {}
     }

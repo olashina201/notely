@@ -1,6 +1,7 @@
 use crate::state::Settings;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::AppHandle;
+use crate::providers::Provider;
 
 pub struct SettingsStore(pub Mutex<Settings>);
 
@@ -22,12 +23,18 @@ pub fn load_settings(app: &AppHandle) -> Settings {
     if let Ok(db_path) = crate::db::db_path(app) {
         if let Ok(db) = crate::db::open(&db_path) {
             for key in [
+                "assistant_provider", "openai_fast_model", "openai_smart_model", "claude_fast_model", "claude_smart_model",
                 "live_model", "fast_model", "smart_model", "language", "overlay_opacity",
                 "content_protection", "click_through", "save_captures", "thinking_level",
-                "search_grounding", "auto_attach_screenshot", "instruction_profile", "custom_instructions",
+                "search_grounding", "auto_attach_screenshot", "instruction_profile", "custom_instructions", "profile_instructions",
             ] {
                 if let Ok(Some(v)) = crate::db::get_setting(&db, key) {
                     match key {
+                        "assistant_provider" => s.assistant_provider = serde_json::from_value(serde_json::json!(v)).unwrap_or_default(),
+                        "openai_fast_model" => s.openai_fast_model = v,
+                        "openai_smart_model" => s.openai_smart_model = v,
+                        "claude_fast_model" => s.claude_fast_model = v,
+                        "claude_smart_model" => s.claude_smart_model = v,
                         "live_model" => s.live_model = v,
                         "fast_model" => s.fast_model = v,
                         "smart_model" => s.smart_model = v,
@@ -41,6 +48,7 @@ pub fn load_settings(app: &AppHandle) -> Settings {
                         "auto_attach_screenshot" => s.auto_attach_screenshot = v == "1" || v == "true",
                         "instruction_profile" => s.instruction_profile = v,
                         "custom_instructions" => s.custom_instructions = v,
+                        "profile_instructions" => s.profile_instructions = serde_json::from_str(&v).unwrap_or_default(),
                         _ => {}
                     }
                 }
@@ -59,8 +67,18 @@ pub fn load_settings(app: &AppHandle) -> Settings {
 pub fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let db_path = crate::db::db_path(app).map_err(|e| e.to_string())?;
     let db = crate::db::open(&db_path).map_err(|e| e.to_string())?;
+    save_settings_to_db(&db, s)
+}
+
+fn save_settings_to_db(db: &rusqlite::Connection, s: &Settings) -> Result<(), String> {
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     let bool = |b: bool| if b { "1" } else { "0" }.to_string();
     let pairs = [
+        ("assistant_provider", s.assistant_provider.id().to_string()),
+        ("openai_fast_model", s.openai_fast_model.clone()),
+        ("openai_smart_model", s.openai_smart_model.clone()),
+        ("claude_fast_model", s.claude_fast_model.clone()),
+        ("claude_smart_model", s.claude_smart_model.clone()),
         ("live_model", s.live_model.clone()),
         ("fast_model", s.fast_model.clone()),
         ("smart_model", s.smart_model.clone()),
@@ -74,40 +92,86 @@ pub fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
         ("auto_attach_screenshot", bool(s.auto_attach_screenshot)),
         ("instruction_profile", s.instruction_profile.clone()),
         ("custom_instructions", s.custom_instructions.clone()),
+        ("profile_instructions", serde_json::to_string(&s.profile_instructions).map_err(|e| e.to_string())?),
     ];
     for (k, v) in pairs {
-        crate::db::set_setting(&db, k, &v).map_err(|e| e.to_string())?;
+        crate::db::set_setting(&tx, k, &v).map_err(|e| e.to_string())?;
     }
-    crate::db::set_hotkeys(&db, &s.hotkeys).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::db::set_hotkeys(&tx, &s.hotkeys).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// API key lives in the OS keychain, never in settings or SQLite.
 const KEYCHAIN_SERVICE: &str = "com.notely.app";
-const KEYCHAIN_USER: &str = "gemini-api-key";
-
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER).map_err(|e| format!("keychain error: {e}"))
+fn entry(provider: Provider) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, &format!("{}-api-key", provider.id())).map_err(|e| format!("keychain error: {e}"))
 }
 
-pub fn key_has() -> bool {
-    entry().ok().and_then(|e| e.get_password().ok()).map(|p| !p.is_empty()).unwrap_or(false)
+// Session-only caching: approve Keychain access once per provider per process.
+// This never writes credentials into SQLite or the frontend.
+fn credential_cache(provider: Provider) -> &'static Mutex<Option<String>> {
+    static CACHES: OnceLock<[Mutex<Option<String>>; 3]> = OnceLock::new();
+    let index = match provider { Provider::Gemini => 0, Provider::Openai => 1, Provider::Claude => 2 };
+    &CACHES.get_or_init(|| std::array::from_fn(|_| Mutex::new(None)))[index]
 }
 
-pub fn key_get() -> Result<String, String> {
-    let e = entry()?;
-    e.get_password().map_err(|e| format!("no API key stored: {e}"))
+fn cached_key(cache: &Mutex<Option<String>>, load: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+    let mut cached = cache.lock().map_err(|_| "Credential cache lock failed")?;
+    if let Some(key) = cached.as_ref() { return Ok(key.clone()); }
+    let key = load()?;
+    *cached = Some(key.clone());
+    Ok(key)
 }
 
-pub fn key_set(key: &str) -> Result<(), String> {
-    entry()?.set_password(key).map_err(|e| format!("keychain store failed: {e}"))
+pub fn key_get(provider: Provider) -> Result<String, String> {
+    cached_key(credential_cache(provider), || {
+        entry(provider)?.get_password().map_err(|e| format!("no API key stored: {e}"))
+    })
 }
 
-pub fn key_clear() -> Result<(), String> {
-    let e = entry()?;
-    match e.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+pub fn key_set(provider: Provider, key: &str) -> Result<(), String> {
+    if key.trim().is_empty() { return Err("API key cannot be empty".into()); }
+    let mut cached = credential_cache(provider).lock().map_err(|_| "Credential cache lock failed")?;
+    entry(provider)?.set_password(key.trim()).map_err(|e| format!("keychain store failed: {e}"))?;
+    *cached = Some(key.trim().to_string());
+    Ok(())
+}
+
+pub fn key_clear(provider: Provider) -> Result<(), String> {
+    let mut cached = credential_cache(provider).lock().map_err(|_| "Credential cache lock failed")?;
+    // Remove the session copy even if the persistent delete needs OS approval.
+    *cached = None;
+    match entry(provider)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(format!("keychain delete failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn profile_instructions_are_saved_to_sqlite_without_losing_legacy_preferences() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut settings = Settings::default();
+        settings.custom_instructions = "Use short paragraphs.".into();
+        settings.profile_instructions.insert("coding".into(), "Rust and React.".into());
+        settings.profile_instructions.insert("writing".into(), "Warm, professional tone.".into());
+        save_settings_to_db(&db, &settings).unwrap();
+        let saved: std::collections::HashMap<String,String> = serde_json::from_str(&crate::db::get_setting(&db,"profile_instructions").unwrap().unwrap()).unwrap();
+        assert_eq!(saved.get("coding").unwrap(), "Rust and React.");
+        assert_eq!(saved.get("writing").unwrap(), "Warm, professional tone.");
+        assert_eq!(crate::db::get_setting(&db,"custom_instructions").unwrap().unwrap(), "Use short paragraphs.");
+        assert!(crate::db::get_setting(&db,"api_key").unwrap().is_none());
+    }
+
+    #[test]
+    fn repeated_requests_load_keychain_only_once_and_errors_are_retryable() {
+        let cache = Mutex::new(None);
+        assert!(cached_key(&cache, || Err("denied".into())).is_err());
+        assert_eq!(cached_key(&cache, || Ok("test-key".into())).unwrap(), "test-key");
+        assert_eq!(cached_key(&cache, || panic!("must not query Keychain again")).unwrap(), "test-key");
+        *cache.lock().unwrap() = None;
+        assert_eq!(cached_key(&cache, || Ok("new-key".into())).unwrap(), "new-key");
     }
 }

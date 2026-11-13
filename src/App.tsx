@@ -1,13 +1,25 @@
 import * as React from 'react';
-import { commands, events } from './api';
-import { HistoryPanel, NotesPanel, SettingsPanel } from './components/panels';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { commands, events, reportDiagnostic } from './api';
+import eventNames from './events.json';
+import { Icon } from './components/Icon';
+import { HistoryPanel, type HistorySelection } from './components/HistoryPanel';
+import { WindowResize } from './components/WindowResize';
+import { SharingControls, shortcutLabel } from './components/SharingControls';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { NotesPanel, SettingsPanel } from './components/panels';
 import { RegionSelector, type SelRect } from './components/RegionSelector';
-import { CapturesBar, TranscriptView } from './components/views';
-import { DEFAULT_HOTKEYS, PRESETS, type AppSettings, type CapturedImage, type MeetingRow, type ModelInfo, type NotesJson, type SelectorBegin, type TranscriptLine } from './types';
+import { CapturesBar, ResponseView, TranscriptView } from './components/views';
+import { DEFAULT_HOTKEYS, PRESETS, PROFILES, PROVIDERS, type ChatSummary, type ChatTurn, type HistoryEntry, type Provider, type AppSettings, type CapturedImage, type MeetingRow, type NotesJson, type SelectorBegin, type TranscriptLine } from './types';
 
-type Panel = 'assist' | 'transcript' | 'notes' | 'history' | 'settings';
+type Panel = 'assist' | 'transcript' | 'notes' | 'history' | 'settings' | 'diagnostics';
 
 const DEFAULT_SETTINGS: AppSettings = {
+  assistantProvider: 'gemini',
+  openaiFastModel: 'gpt-4.1-mini',
+  openaiSmartModel: 'gpt-4.1',
+  claudeFastModel: 'claude-haiku-4-5-20251001',
+  claudeSmartModel: 'claude-sonnet-4-6',
   liveModel: 'gemini-2.0-flash-live-001',
   fastModel: 'gemini-2.5-flash',
   smartModel: 'gemini-2.5-pro',
@@ -19,8 +31,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   thinkingLevel: 'low',
   searchGrounding: false,
   autoAttachScreenshot: true,
-  instructionProfile: 'interview',
+  instructionProfile: 'general',
   customInstructions: '',
+  profileInstructions: {},
   hotkeys: { ...DEFAULT_HOTKEYS },
 };
 
@@ -42,16 +55,29 @@ function parseNotes(json: string | null): NotesJson | null {
   }
 }
 
-const PRESET_ICON: Record<string, string> = { say: '🪄', followup: '💬', recap: '🔄', screen: '⌖' };
+const PRESET_ICON: Record<string, string> = { say: 'chat', followup: 'chat', recap: 'notes', screen: 'screen' };
+const PRESET_DETAIL: Record<string, string> = { say: 'Find the right words', followup: 'Keep the conversation going', recap: 'Catch up on the key points', screen: 'Make sense of what’s in front of you' };
 
 export function App() {
   const [settings, setSettings] = React.useState<AppSettings>(DEFAULT_SETTINGS);
   const [ready, setReady] = React.useState(false);
+  const [eventsReady, setEventsReady] = React.useState(false);
   const [panel, setPanel] = React.useState<Panel>('assist');
-  const [menuOpen, setMenuOpen] = React.useState(false);
-  const [showTranscript, setShowTranscript] = React.useState(false);
-  const [smartMode, setSmartMode] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
+  const copyTimer = React.useRef<ReturnType<typeof setTimeout>>();
+  React.useEffect(() => () => clearTimeout(copyTimer.current), []);
+  async function copyAnswer() {
+    try {
+      await navigator.clipboard.writeText(answer);
+      setCopied(true);
+      clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch { setErr('Could not copy the answer. Select the text and press ⌘C.'); }
+  }
+  const [smartMode, setSmartMode] = React.useState(true);
   const [activePreset, setActivePreset] = React.useState<string | null>(null);
+  const [meetingBusy, setMeetingBusy] = React.useState(false);
+  const [preferencesBusy, setPreferencesBusy] = React.useState(false);
   const [recording, setRecording] = React.useState(false);
   const [liveStatus, setLiveStatus] = React.useState('idle');
   const [lines, setLines] = React.useState<TranscriptLine[]>([]);
@@ -74,22 +100,39 @@ export function App() {
     }, 100);
     return () => clearInterval(iv);
   }, [asking]);
-  const [keyHas, setKeyHas] = React.useState(false);
-  const [keyMsg, setKeyMsg] = React.useState<string | null>(null);
-  const [models, setModels] = React.useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = React.useState(false);
   const [notes, setNotes] = React.useState<NotesJson | null>(null);
   const [notesGenerating, setNotesGenerating] = React.useState(false);
   const [history, setHistory] = React.useState<MeetingRow[]>([]);
+  const [chats, setChats] = React.useState<ChatSummary[]>([]);
+  const [recentChats, setRecentChats] = React.useState<ChatSummary[]>([]);
+  const [historyQuery, setHistoryQuery] = React.useState('');
+  const historyQueryRef = React.useRef('');
+  const searchGeneration = React.useRef(0);
+  const selectionGeneration = React.useRef(0);
+  const [historyLoading, setHistoryLoading] = React.useState(false);
+  const currentChatId = React.useRef<string>(crypto.randomUUID());
+  const completedTurns = React.useRef<ChatTurn[]>([]);
+  const [pastTurns, setPastTurns] = React.useState<ChatTurn[]>([]);
+  const [responseLabel, setResponseLabel] = React.useState('');
   const [historySearching, setHistorySearching] = React.useState(false);
-  const [selected, setSelected] = React.useState<{ row: MeetingRow; transcript: TranscriptLine[]; notes: NotesJson | null } | null>(null);
+  const [selected, setSelected] = React.useState<HistorySelection | null>(null);
   const [selector, setSelector] = React.useState<SelectorBegin | null>(null);
 
   const settingsRef = React.useRef(settings);
   settingsRef.current = settings;
   const streamingRef = React.useRef(false);
+  const activeRequest = React.useRef<string | null>(null);
+  const requestStarted = React.useRef(0);
+  const requestHasImages = React.useRef(false);
+  const firstTokenSeen = React.useRef(false);
+  const lastPrompt = React.useRef<{ preset: string | null; question: string }>({ preset: null, question: '' });
+  const [firstTokenSeconds, setFirstTokenSeconds] = React.useState<number | null>(null);
+  const runAssistRef = React.useRef(runAssist);
+  runAssistRef.current = runAssist;
+  const beginRegionRef = React.useRef(beginRegionSelect);
+  beginRegionRef.current = beginRegionSelect;
   const selectorSaved = React.useRef<{ x: number; y: number; w: number; h: number } | null>(null);
-  const inputRef = React.useRef<HTMLInputElement>(null);
+  const inputRef = React.useRef<HTMLTextAreaElement>(null);
 
   React.useEffect(() => {
     if (ready && panel === 'assist') {
@@ -100,25 +143,82 @@ export function App() {
     }
   }, [ready, panel]);
 
+  function openPanel(next: Panel) {
+    setPanel(next);
+    if (next !== 'assist') void commands.overlayInteractive().catch((e) => setErr(String(e)));
+  }
+
+  React.useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !selector) {
+        if (panel !== 'assist') {
+          event.preventDefault();
+          setPanel('assist');
+          void commands.overlayInteractive().catch((e) => setErr(String(e)));
+        }
+      }
+    };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [panel, selector]);
+
   // ---- initial load ----
   React.useEffect(() => {
-    commands.settingsGet().then(setSettings).catch(() => {}).finally(() => setReady(true));
-    commands.keyHas().then(setKeyHas).catch(() => {});
+    commands.settingsGet().then(s => setSettings({ ...DEFAULT_SETTINGS, ...s, profileInstructions: s.profileInstructions ?? {} })).catch(() => {}).finally(() => setReady(true));
     refreshHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refreshHistory() {
-    try {
-      setHistory(await commands.historyList(50));
-    } catch {
-      /* ignore */
-    }
+  async function refreshHistory() { await searchHistory(historyQueryRef.current); }
+
+  function newChat() {
+    if (streamingRef.current) return;
+    currentChatId.current = crypto.randomUUID();
+    completedTurns.current = [];
+    setPastTurns([]); setAnswer(''); setQuestion(''); setActivePreset(null); setFirstTokenSeconds(null); setErr(null); setCopied(false);
+    void clearCaptures();
+    openPanel('assist');
   }
 
   // ---- backend events ----
   React.useEffect(() => {
     const subs: { (): void }[] = [];
+    let disposed = false;
+    let registered = 0;
+    const probeId = crypto.randomUUID();
+    let probeReceived = false;
+    let probeTimer: ReturnType<typeof setTimeout> | null = null;
+    const register = (unlisten: () => void) => {
+      if (disposed) { unlisten(); return; }
+      subs.push(unlisten);
+      registered += 1;
+      if (registered === Object.keys(eventNames).length) {
+        void commands.diagnosticsProbe(probeId).catch(listenerFailed);
+        probeTimer = setTimeout(() => {
+          if (!disposed && !probeReceived) {
+            reportDiagnostic('listener_failed', probeId, eventNames.diagnosticsProbe);
+            listenerFailed();
+          }
+        }, 3000);
+      }
+    };
+    const listenerFailed = () => {
+      if (!disposed) {
+        setEventsReady(false);
+        setErr('Could not connect to app events. Open Diagnostics, then restart Notely.');
+      }
+    };
+    events.onClickthroughChanged((payload) => {
+      setSettings((s) => ({ ...s, clickThrough: payload.enabled }));
+      if (payload.enabled) setPanel('assist');
+    }).then(register).catch(listenerFailed);
+    events.onDiagnosticsProbe((payload) => {
+      if (disposed || payload.requestId !== probeId) return;
+      probeReceived = true;
+      if (probeTimer) clearTimeout(probeTimer);
+      setEventsReady(true);
+      reportDiagnostic('listeners_ready', probeId, eventNames.diagnosticsProbe);
+    }).then(register).catch(listenerFailed);
     events.onTranscriptPartial((line) => {
       setLines((ls) => {
         const i = ls.findIndex((l) => l.id === line.id);
@@ -129,7 +229,7 @@ export function App() {
         }
         return [...ls, line];
       });
-    }).then((u) => subs.push(u));
+    }).then(register).catch(listenerFailed);
     events.onTranscriptFinal((line) => {
       setLines((ls) => {
         const i = ls.findIndex((l) => l.id === line.id);
@@ -141,42 +241,55 @@ export function App() {
         commands.meetingTranscriptAdd(line).catch(() => {});
         return [...tail, ...partials];
       });
-    }).then((u) => subs.push(u));
-    events.onTranscriptStatus((s) => setLiveStatus(s.status)).then((u) => subs.push(u));
-    events.onCaptureTaken((img) => setCaptures((c) => [...c, img].slice(-4))).then((u) => subs.push(u));
+    }).then(register).catch(listenerFailed);
+    events.onTranscriptStatus((s) => setLiveStatus(s.status)).then(register).catch(listenerFailed);
+    events.onCaptureTaken((img) => setCaptures((c) => [...c, img].slice(-4))).then(register).catch(listenerFailed);
     events.onAssistChunk((c) => {
-      console.log('[App] onAssistChunk received chunk len:', c.text.length);
+      if (c.requestId !== activeRequest.current) return;
+      if (!firstTokenSeen.current) {
+        firstTokenSeen.current = true;
+        reportDiagnostic('first_text', c.requestId, undefined, Math.round(performance.now() - requestStarted.current));
+        setFirstTokenSeconds((performance.now() - requestStarted.current) / 1000);
+      }
       setAnswer((a) => a + c.text);
       setAsking(false);
-    }).then((u) => subs.push(u));
+    }).then(register).catch(listenerFailed);
     events.onAssistDone((d) => {
-      console.log('[App] onAssistDone received:', d);
+      if (d.requestId !== activeRequest.current) return;
+      reportDiagnostic(d.error ? 'request_failed' : d.cancelled ? 'request_cancelled' : 'request_finished', d.requestId, undefined, Math.round(performance.now() - requestStarted.current));
+      activeRequest.current = null;
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
       setAskingElapsed(0);
       if (d.error) setErr(d.error);
-    }).then((u) => subs.push(u));
+      if (!d.error && !d.cancelled) {
+        const chatId = currentChatId.current;
+        if (d.historySaved === false) setErr('Your answer is ready, but could not be saved to History. Check available disk space and Diagnostics.');
+        else void commands.chatsGet(chatId).then(turns => { if (currentChatId.current === chatId) completedTurns.current = turns; }).catch(() => {});
+        void refreshHistory();
+      }
+    }).then(register).catch(listenerFailed);
     events.onError((e) => {
-      console.error('[App] onError received:', e.message);
-      streamingRef.current = false;
-      setStreaming(false);
-      setAsking(false);
-      setAskingElapsed(0);
+      // Audio/session errors must not reset an unrelated assistant request.
       setErr(e.message);
-    }).then((u) => subs.push(u));
+    }).then(register).catch(listenerFailed);
     events.onStealthChanged((p) => {
       setSettings((s) => ({ ...s, contentProtection: p.stealth }));
-    }).then((u) => subs.push(u));
+    }).then(register).catch(listenerFailed);
+    events.onHotkeyFocusChat(() => {
+      setPanel('assist');
+      setTimeout(() => { if (!disposed) inputRef.current?.focus(); }, 80);
+    }).then(register).catch(listenerFailed);
     events.onHotkeyAssist(() => {
-      if (!streamingRef.current) void runAssist(null);
-    }).then((u) => subs.push(u));
+      if (!streamingRef.current) void runAssistRef.current(null);
+    }).then(register).catch(listenerFailed);
     events.onHotkeyPreset((p) => {
-      if (!streamingRef.current) void runAssist(p.preset);
-    }).then((u) => subs.push(u));
+      if (!streamingRef.current) void runAssistRef.current(p.preset);
+    }).then(register).catch(listenerFailed);
     events.onHotkeyRegion(() => {
-      void beginRegionSelect();
-    }).then((u) => subs.push(u));
+      void beginRegionRef.current();
+    }).then(register).catch(listenerFailed);
 
     // Automatically focus the input field so users can type immediately
     inputRef.current?.focus();
@@ -186,6 +299,8 @@ export function App() {
     window.addEventListener('focus', handleWinFocus);
 
     return () => {
+      disposed = true;
+      if (probeTimer) clearTimeout(probeTimer);
       subs.forEach((u) => u());
       window.removeEventListener('focus', handleWinFocus);
     };
@@ -195,20 +310,47 @@ export function App() {
   // Auto-clear transient errors after a few seconds, but keep quota/model errors visible.
   React.useEffect(() => {
     if (!err) return;
-    if (err.toLowerCase().includes('quota') || err.toLowerCase().includes('limit') || err.toLowerCase().includes('key') || err.toLowerCase().includes('model')) return;
+    if (['permission', 'capture', 'screen', 'not ready'].some((s) => err.toLowerCase().includes(s)) || err.toLowerCase().includes('quota') || err.toLowerCase().includes('limit') || err.toLowerCase().includes('key') || err.toLowerCase().includes('model')) return;
     const t = setTimeout(() => setErr(null), 6000);
     return () => clearTimeout(t);
   }, [err]);
 
+  React.useEffect(() => {
+    if (!streaming) return;
+    const timer = setInterval(() => {
+      const id = activeRequest.current;
+      if (id && performance.now() - requestStarted.current > (requestHasImages.current ? 115000 : 80000)) {
+        reportDiagnostic('watchdog_timeout', id, undefined, Math.round(performance.now() - requestStarted.current));
+        activeRequest.current = null;
+        streamingRef.current = false;
+        setStreaming(false);
+        setAsking(false);
+        setErr('No completion received before the request deadline. Open Diagnostics to see the last request stage.');
+        void commands.assistCancel(id).catch(() => {});
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [streaming]);
+
+  React.useEffect(() => {
+    const onError = () => reportDiagnostic('javascript_error', activeRequest.current ?? undefined);
+    const onRejection = () => reportDiagnostic('unhandled_rejection', activeRequest.current ?? undefined);
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => { window.removeEventListener('error', onError); window.removeEventListener('unhandledrejection', onRejection); };
+  }, []);
+
   // ---- meeting ----
   async function toggleMeeting() {
+    if (meetingBusy) return;
+    setMeetingBusy(true);
     setErr(null);
     try {
       if (recording) {
         const res = await commands.meetingStop();
         setRecording(false);
         setLiveStatus('idle');
-        if (res.saved) await refreshHistory();
+        await refreshHistory();
       } else {
         setLines([]);
         setCaptures([]);
@@ -221,7 +363,7 @@ export function App() {
       }
     } catch (e) {
       setErr(String(e));
-    }
+    } finally { setMeetingBusy(false); }
   }
 
   // ---- stealth mode ----
@@ -237,21 +379,31 @@ export function App() {
 
   // ---- assist ----
   function cancelAssist() {
+    const id = activeRequest.current;
+    if (id) reportDiagnostic('request_cancelled', id, undefined, Math.round(performance.now() - requestStarted.current));
+    activeRequest.current = null;
     streamingRef.current = false;
     setStreaming(false);
     setAsking(false);
-    setAskingElapsed(0);
     setErr(null);
-    void commands.assistCancel();
+    if (id) void commands.assistCancel(id).catch((e) => setErr(String(e)));
   }
 
-  async function runAssist(preset: string | null, slot?: 'fast' | 'smart') {
-    if (streamingRef.current) {
-      try { await commands.assistCancel(); } catch {}
-    }
-    const currentQ = preset ? '' : question || 'What should I focus on?';
-    console.log('[App] runAssist starting:', currentQ);
+  async function runAssist(preset: string | null, slot?: 'fast' | 'smart', questionOverride?: string) {
+    if (streamingRef.current || preferencesBusy) return;
+    if (!eventsReady) { setErr('App event listeners are not ready. Check Diagnostics or restart Notely.'); return; }
+    const currentQ = preset ? '' : (questionOverride ?? question) || 'What should I focus on?';
+    lastPrompt.current = { preset, question: currentQ };
+    const id = crypto.randomUUID();
+    activeRequest.current = id;
+    reportDiagnostic('request_started', id);
+    requestHasImages.current = preset === 'screen' || captures.length > 0;
+    requestStarted.current = performance.now();
+    firstTokenSeen.current = false;
+    setFirstTokenSeconds(null);
     setErr(null);
+    setPastTurns(completedTurns.current);
+    setResponseLabel(`${PROVIDERS.find(p=>p.id === settingsRef.current.assistantProvider)?.name} · ${PROFILES.find(p=>p.id === settingsRef.current.instructionProfile)?.name}`);
     setAnswer('');
     setStreaming(true);
     setAsking(true);
@@ -259,28 +411,50 @@ export function App() {
     streamingRef.current = true;
     setActivePreset(preset);
     setPanel('assist');
-    setMenuOpen(false);
     const s = settingsRef.current;
-    const needScreenshot = preset === 'screen' || captures.length > 0;
     try {
       await commands.assistRun({
+        requestId: id,
+        conversationId: currentChatId.current,
         question: currentQ,
         preset,
-        includeScreenshot: needScreenshot,
+        includeScreenshot: preset === 'screen' || captures.length > 0,
         profileId: s.instructionProfile,
         customInstructions: s.customInstructions || null,
         slot: slot ?? (smartMode ? 'smart' : 'fast'),
       });
+      reportDiagnostic('request_accepted', id, undefined, Math.round(performance.now() - requestStarted.current));
       if (!preset) setQuestion('');
     } catch (e) {
-      console.error('[App] assistRun invocation error:', e);
+      reportDiagnostic('request_failed', id, undefined, Math.round(performance.now() - requestStarted.current));
+      if (activeRequest.current !== id) return;
+      activeRequest.current = null;
       streamingRef.current = false;
       setStreaming(false);
       setAsking(false);
-      setAskingElapsed(0);
       setErr(String(e));
     }
   }
+
+  async function changeProvider(provider: Provider) {
+    if (preferencesBusy || streamingRef.current) return;
+    setPreferencesBusy(true);
+    try {
+      const next = { ...settingsRef.current, assistantProvider: provider };
+      await commands.settingsSet(next); setSettings(next);
+    } catch (e) { setErr(String(e)); }
+    finally { setPreferencesBusy(false); }
+  }
+  async function changeProfile(profile: string) {
+    if (preferencesBusy || streamingRef.current) return;
+    setPreferencesBusy(true);
+    try {
+      const next = { ...settingsRef.current, instructionProfile: profile };
+      await commands.settingsSet(next); setSettings(next);
+    } catch (e) { setErr(String(e)); }
+    finally { setPreferencesBusy(false); }
+  }
+
 
   // ---- captures ----
   async function beginRegionSelect() {
@@ -306,8 +480,7 @@ export function App() {
     }
     if (!rect) return;
     try {
-      const img = await commands.captureRegion(rect.x, rect.y, rect.w, rect.h);
-      setCaptures((c) => [...c, img].slice(-4));
+      await commands.captureRegion(rect.x, rect.y, rect.w, rect.h);
     } catch (e) {
       setErr(String(e));
     }
@@ -334,300 +507,150 @@ export function App() {
   }
 
   async function searchHistory(q: string) {
+    historyQueryRef.current = q;
+    const generation = ++searchGeneration.current;
     setHistorySearching(true);
     try {
-      setHistory(q.trim() ? await commands.historySearch(q.trim()) : await commands.historyList(50));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setHistorySearching(false);
-    }
+      const [meetings, savedChats] = await Promise.all([q.trim() ? commands.historySearch(q.trim()) : commands.historyList(100), commands.chatsList(q.trim())]);
+      if (generation !== searchGeneration.current) return;
+      setHistory(meetings); setChats(savedChats);
+      if (!q.trim()) setRecentChats(savedChats);
+    } catch (e) { if (generation === searchGeneration.current) setErr(String(e)); }
+    finally { if (generation === searchGeneration.current) setHistorySearching(false); }
   }
-
-  async function selectMeeting(id: number) {
+  async function selectHistory(entry: HistoryEntry) {
+    const generation = ++selectionGeneration.current;
+    setHistoryLoading(true);
     try {
-      const row = await commands.historyGet(id);
-      if (row) setSelected({ row, transcript: parseTranscript(row.transcriptJson), notes: parseNotes(row.notesJson) });
-    } catch (e) {
-      setErr(String(e));
-    }
+      if (entry.kind === 'chat') {
+        const turns = await commands.chatsGet(entry.chat.id);
+        if (generation === selectionGeneration.current) setSelected({ kind: 'chat', summary: entry.chat, turns });
+      } else {
+        const row = await commands.historyGet(entry.meeting.id);
+        if (row && generation === selectionGeneration.current) setSelected({ kind:'meeting', row, transcript:parseTranscript(row.transcriptJson), notes:parseNotes(row.notesJson) });
+      }
+    } catch (e) { setErr(String(e)); }
+    finally { if (generation === selectionGeneration.current) setHistoryLoading(false); }
   }
-
-  async function deleteMeeting(id: number) {
+  async function deleteHistory(entry: HistoryEntry) {
     try {
-      await commands.historyDelete(id);
-      if (selected?.row.id === id) setSelected(null);
-      await refreshHistory();
-    } catch (e) {
-      setErr(String(e));
-    }
+      if (entry.kind === 'chat') {
+        await commands.chatsDelete(entry.chat.id);
+        if (currentChatId.current === entry.chat.id) { newChat(); openPanel('history'); }
+      } else { await commands.historyDelete(entry.meeting.id); }
+      setSelected(null); await refreshHistory();
+      if (historyQueryRef.current.trim()) setRecentChats(await commands.chatsList());
+    } catch (e) { setErr(String(e)); throw e; }
+  }
+  function continueChat(selection: Extract<HistorySelection, {kind:'chat'}>) {
+    if (streamingRef.current) return;
+    const last = selection.turns[selection.turns.length - 1];
+    if (!last) return;
+    currentChatId.current = selection.summary.id;
+    completedTurns.current = selection.turns;
+    setPastTurns(selection.turns.slice(0,-1)); setAnswer(last.answer); setQuestion('');
+    setActivePreset(null); lastPrompt.current = { preset:null, question:last.question };
+    setResponseLabel(`${PROVIDERS.find(p=>p.id === last.provider)?.name} · ${PROFILES.find(p=>p.id === last.profileId)?.name}`);
+    void changeProfile(last.profileId);
+    setFirstTokenSeconds(null); setErr(null); void clearCaptures(); openPanel('assist');
   }
 
   // ---- window drag (any non-interactive area) ----
   function maybeDrag(e: React.MouseEvent) {
     if (e.button !== 0 || selector) return;
-    if ((e.target as HTMLElement).closest('button,input,textarea,a,select,[data-nodrag]')) return;
-    import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-      getCurrentWindow().startDragging().catch(() => {});
-    });
+    if ((e.target as HTMLElement).closest('button,input,textarea,a,select,label,summary,details,[role=button],[data-nodrag]')) return;
+    void getCurrentWindow().startDragging().catch(() => {});
   }
 
-  if (!ready) return null;
+  if (!ready) return <div className="app-loading">Getting Notely ready…</div>;
 
-  const opacity = selector ? 1 : settings.overlayOpacity;
-  const glass = { background: `rgba(16,18,24,${opacity})`, backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' };
-  const presetLabel = activePreset ? PRESETS.find((p) => p.id === activePreset)?.label ?? activePreset : null;
+  const glass = { background: `rgba(27,30,32,${selector ? 1 : settings.overlayOpacity})` };
+  const providerName = PROVIDERS.find((p) => p.id === settings.assistantProvider)?.name;
+  const activeProfile = PROFILES.find(p=>p.id === settings.instructionProfile) ?? PROFILES[0];
+  const historyEntries: HistoryEntry[] = [...chats.map(chat => ({kind:'chat' as const,key:`chat:${chat.id}`,chat})), ...history.map(meeting => ({kind:'meeting' as const,key:`meeting:${meeting.id}`,meeting}))].sort((a,b)=>(b.kind === 'chat' ? b.chat.updatedAt : b.meeting.startedAt) - (a.kind === 'chat' ? a.chat.updatedAt : a.meeting.startedAt));
+  const presetLabel = activePreset ? PRESETS.find((p) => p.id === activePreset)?.label : null;
+  const navItems: { id: Panel; label: string; icon: string }[] = [
+    { id: 'assist', label: 'Companion', icon: 'chat' },
+    { id: 'transcript', label: 'Transcript', icon: 'wave' },
+    { id: 'notes', label: 'Notes', icon: 'notes' },
+    { id: 'history', label: 'History', icon: 'history' },
+  ];
 
   return (
-    <div className="h-full flex flex-col items-center pt-2 pb-3 px-4" onMouseDown={maybeDrag} style={{ cursor: 'default' }}>
-      {/* Detached top pill: stealth controls */}
-      <div className="flex items-center gap-1 pl-1.5 pr-1.5 py-1 rounded-full border border-white/15 shadow-2xl" style={glass}>
-        <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[15px] ${recording ? 'bg-red-500/25' : 'bg-white/10'}`} title={recording ? (liveStatus === 'reconnecting' ? 'Reconnecting…' : 'Recording') : 'Idle'}>
-          {recording ? <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" /> : <span className="text-white/80">✦</span>}
-        </div>
-        <button onClick={() => void toggleStealth()}
-          title={settings.contentProtection ? 'Stealth Mode is ACTIVE (hidden from screen share & Dock). Click to deactivate.' : 'Stealth Mode is OFF (visible in screen share & Dock). Click to activate.'}
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${
-            settings.contentProtection
-              ? 'bg-emerald-500/20 border border-emerald-400/35 text-emerald-300 hover:bg-emerald-500/30'
-              : 'bg-amber-500/15 border border-amber-400/30 text-amber-200 hover:bg-amber-500/25'
-          }`}>
-          <span className="text-[12px]">{settings.contentProtection ? '🥷' : '👀'}</span>
-          <span>{settings.contentProtection ? 'Stealth' : 'Visible'}</span>
-        </button>
-        <button onClick={() => void commands.overlayHide()} title="Hide overlay (global hotkey brings it back)"
-          className="flex items-center gap-1 px-3 py-1 rounded-full text-[13px] text-white/85 hover:bg-white/10">
-          <span className="text-white/50 text-[11px]">∨</span> Hide
-        </button>
-        <button onClick={() => void toggleMeeting()} title={recording ? 'Stop meeting' : 'Start meeting'}
-          className={`w-7 h-7 rounded-full flex items-center justify-center ${recording ? 'bg-red-500/80 hover:bg-red-500' : 'bg-white/10 hover:bg-white/20'}`}>
-          {recording
-            ? <span className="w-2.5 h-2.5 rounded-[3px] bg-white" />
-            : <span className="w-2.5 h-2.5 rounded-full bg-white/85" />}
-        </button>
-      </div>
+    <div className="app-frame">
+      <main className={`companion-window ${settings.contentProtection ? 'protected-pointer' : ''}`} style={glass}>
+        <header className="window-header" onMouseDown={maybeDrag}>
+          <div className="brand"><span className="brand-mark"><Icon name="notebook" size={19} /></span><span>notely<span className="brand-caption">Your everyday companion</span></span></div>
+          <div className="window-controls">
+            <button aria-label={settings.contentProtection ? 'Protection requested' : 'Protection off'} className={`privacy-control ${settings.contentProtection ? 'requested' : ''}`} onClick={() => void toggleStealth()}
+              title={settings.contentProtection ? 'Capture protection requested. Visibility depends on macOS and the sharing app; test before sharing.' : 'Request screen-capture protection. Compatibility depends on macOS and the sharing app.'}>
+              <Icon name="shield" size={14} /><span>{settings.contentProtection ? 'Protection requested' : 'Protection off'}</span>
+            </button>
+            <WindowResize disabled={!!selector} onError={setErr} />
+            <button className={`icon-button ${panel === 'settings' ? 'selected' : ''}`} aria-label="Settings" title="Settings" onClick={() => openPanel(panel === 'settings' ? 'assist' : 'settings')}><Icon name="settings" /></button>
+            <button className="icon-button" aria-label="Hide Notely" title="Hide Notely · ⌘⇧H" onClick={() => void commands.overlayHide()}><Icon name="hide" /></button>
+          </div>
+        </header>
 
-      {/* Main glass card */}
-      <div className="w-full max-w-[760px] mt-2 rounded-2xl border border-white/12 shadow-2xl flex flex-col min-h-0 overflow-hidden" style={glass}>
-        {panel === 'assist' && (
-          <>
-            {/* Active preset pill */}
-            {presetLabel && (
-              <div className="flex justify-end px-4 pt-3">
-                <span className="px-3 py-1 rounded-full bg-blue-600/90 text-white text-[13px] font-medium shadow">{presetLabel}</span>
-              </div>
-            )}
+        {settings.clickThrough && <div className="input-mode-notice" role="status"><Icon name="screen" size={14} /><span>Mouse clicks pass through to the app underneath.</span><kbd>{shortcutLabel(settings.hotkeys.toggleClickThrough || DEFAULT_HOTKEYS.toggleClickThrough)}</kbd><span>to interact with Notely again</span></div>}
+        <nav className="navigation" aria-label="Main navigation">
+          <div className="navigation-tabs">{navItems.map((item) => <button key={item.id} className={`nav-tab ${panel === item.id ? 'active' : ''}`} aria-current={panel === item.id ? 'page' : undefined} onClick={() => openPanel(item.id)}><Icon name={item.icon} size={15} /><span>{item.label}</span></button>)}</div>
+          <button className={`meeting-button ${recording ? 'is-recording' : ''}`} disabled={meetingBusy} onClick={() => void toggleMeeting()} title={recording ? 'Stop meeting and save session' : 'Start meeting transcription with Gemini'}><span className="status-dot" /><span>{meetingBusy ? 'One moment…' : recording ? (liveStatus === 'reconnecting' ? 'Reconnecting' : 'End meeting') : 'Start meeting'}</span></button>
+        </nav>
 
-            {/* Answer */}
-            <div className="px-5 pt-3 pb-1 overflow-y-auto min-h-[72px] max-h-64">
-              {!answer ? (
-                <div className="text-[13px] text-white/35 text-center py-5">
-                  {asking ? (
-                    <span className="flex items-center justify-center gap-2 text-white/70">
-                      <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
-                      <span>{smartMode ? 'Smart reasoning…' : 'Thinking…'}</span>
-                      <span className="text-[11px] text-white/40 tabular-nums">({askingElapsed.toFixed(1)}s)</span>
-                      <button onClick={cancelAssist} className="text-[11px] text-white/75 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded-full ml-1 transition">Cancel</button>
-                    </span>
-                  ) : err ? (
-                    <div className="flex flex-col items-center justify-center gap-1.5 py-1 text-center select-text">
-                      <span className="text-amber-400 text-sm font-medium">⚠️ {err.toLowerCase().includes('quota') || err.toLowerCase().includes('limit') ? 'Model Quota Limit' : 'Assist Error'}</span>
-                      <span className="text-[12.5px] text-white/80 max-w-lg leading-relaxed">{err.replace(/^Error:\s*/, '')}</span>
-                      <div className="flex items-center gap-2 mt-2">
-                        <button onClick={() => { setErr(null); void runAssist(null, 'fast'); }} className="px-3 py-1 rounded-lg bg-blue-600/80 hover:bg-blue-600 text-white text-[12px] font-medium shadow">
-                          ⚡ Try Fast Model
-                        </button>
-                        <button onClick={() => setPanel('settings')} className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/90 text-[12px]">
-                          ⚙️ Settings
-                        </button>
-                        <button onClick={() => setErr(null)} className="px-2 py-1 text-white/40 hover:text-white text-[12px]">
-                          Dismiss
-                        </button>
-                      </div>
-                    </div>
-                  ) : recording ? (
-                    'Listening… ask anything with Enter or ⌘/Ctrl+Enter.'
-                  ) : (
-                    'Start the meeting or ask a question — answers appear here, invisible to screen share.'
-                  )}
-                </div>
-              ) : (
-                <div className="text-[15px] leading-relaxed text-white/90 whitespace-pre-wrap select-text">
-                  {answer}
-                  {streaming && <span className="inline-block w-2 h-4 ml-1 align-middle bg-blue-400/80 animate-pulse" />}
-                </div>
-              )}
-            </div>
+        <SharingControls enabled={settings.contentProtection} hotkeys={settings.hotkeys} />
+        {panel === 'assist' ? <>
+          <div className="assistant-content" data-nodrag>
+            {!answer && !asking && !err && pastTurns.length === 0 && <div className="welcome-view">
+              <div className="welcome-heading"><div><p className="eyebrow">A little clarity, whenever you need it</p><h1>What’s on your mind?</h1><p className="welcome-description">Think it through, find the words, or get a fresh pair of eyes.</p></div></div>
+              <div className="suggestion-grid">{PRESETS.map((p) => <button key={p.id} className="suggestion-card" disabled={!eventsReady || streaming} onClick={() => void runAssist(p.id)}><span className={`suggestion-icon ${p.id}`}><Icon name={PRESET_ICON[p.id]} size={18} /></span><span><strong>{p.label}</strong><small>{PRESET_DETAIL[p.id]}</small></span><span className="suggestion-arrow">↗</span></button>)}</div>
+              <div className="home-profile"><span className="suggestion-icon"><Icon name={activeProfile.icon} size={17} /></span><div><strong>Your {activeProfile.name.toLowerCase()} companion</strong><p>{activeProfile.description}</p><small>{settings.profileInstructions[activeProfile.id]?.trim() ? 'Your personal instructions are included' : 'Add your context to make this profile more useful'}</small></div><button onClick={()=>openPanel('settings')}>Personalize ↗</button></div>
+              <div className="home-context"><span className="status-dot ready" />{recording ? `Meeting connected · ${lines.filter(l=>l.isFinal).length} transcript lines` : 'AI chats are saved locally on this Mac'}<span>{captures.length ? `${captures.length} screen capture${captures.length === 1 ? '' : 's'} attached` : `${activeProfile.name} profile selected`}</span></div>
+              {recentChats.length > 0 && <div className="home-recent"><div className="home-section-title"><span>Pick up where you left off</span><button onClick={()=>{setSelected(null);openPanel('history');}}>All history ↗</button></div>{recentChats.slice(0,2).map(chat=><button className="recent-chat" key={chat.id} disabled={streaming || historyLoading} onClick={()=>{openPanel('history');void selectHistory({kind:'chat',key:`chat:${chat.id}`,chat});}}><Icon name="chat" size={14} /><span>{chat.title}</span><small>{chat.turnCount} {chat.turnCount === 1 ? 'exchange' : 'exchanges'}</small><span>↗</span></button>)}</div>}
 
-            {/* Quick actions */}
-            <div className="flex items-center justify-center gap-0.5 px-3 py-1.5 text-[13px] text-white/70 flex-wrap">
-              <button onClick={() => { setActivePreset(null); setAnswer(''); }} className="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-white/10 hover:text-white/90" title="Clear answer">
-                <span>✨</span> Assist
-              </button>
-              {PRESETS.map((p) => (
-                <span key={p.id} className="flex items-center">
-                  <span className="text-white/20">·</span>
-                  <button onClick={() => void runAssist(p.id)} disabled={asking}
-                    className={`flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-white/10 hover:text-white/90 disabled:opacity-50 ${activePreset === p.id ? 'text-white/95' : ''}`}>
-                    <span>{PRESET_ICON[p.id] ?? '•'}</span> {p.label}
-                  </button>
-                </span>
-              ))}
-            </div>
+            </div>}
 
-            {/* Live transcript (collapsible) + captures */}
-            {showTranscript && <TranscriptView lines={lines} recording={recording} />}
+            {pastTurns.length > 0 && <div className="past-turns">{pastTurns.map(turn=><article className="past-turn" key={turn.requestId}><p className="user-question">{turn.question}</p><div className="turn-attribution"><Icon name="notebook" size={13} />Notely · {PROFILES.find(p=>p.id === turn.profileId)?.name}</div><ResponseView text={turn.answer} streaming={false} /></article>)}</div>}
+            {asking && !answer && <div className="thinking-state" role="status"><span className="thinking-mark"><Icon name="notebook" size={24} /></span><h2>{requestHasImages.current ? 'Taking a closer look…' : 'Thinking it through…'}</h2><p>{providerName} · {askingElapsed.toFixed(1)}s</p><button className="text-button" onClick={cancelAssist}>Cancel request</button></div>}
+
+            {answer && <section className="answer-section" aria-label="Assistant response">
+              <div className="answer-toolbar"><span className="answer-identity"><span className="answer-mark"><Icon name="notebook" size={14} /></span>Notely<span className="answer-provider">{responseLabel || providerName}{streaming ? ' · Writing…' : ''}</span></span><div className="answer-tools"><button className="icon-button" onClick={() => void copyAnswer()} aria-label={copied ? 'Answer copied' : 'Copy answer'} title={copied ? 'Copied' : 'Copy answer'}><Icon name={copied ? 'check' : 'copy'} size={15} /></button><button className="icon-button" disabled={streaming} onClick={newChat} aria-label="New question" title="New question"><Icon name="plus" size={17} /></button></div></div>
+              <div className="request-label">{presetLabel || lastPrompt.current.question}</div>
+              <ResponseView text={answer} streaming={streaming} />
+            </section>}
+          </div>
+
+          <div className="composer-area" data-nodrag>
+            {(answer || asking) && <div className="quick-actions">{PRESETS.map((p) => <button key={p.id} disabled={streaming || !eventsReady} onClick={() => void runAssist(p.id)}><Icon name={PRESET_ICON[p.id]} size={13} />{p.label}</button>)}</div>}
             {captures.length > 0 && <CapturesBar captures={captures} onClear={() => void clearCaptures()} />}
-
-            {/* Input row */}
-            <div className="px-4 pb-4 pt-1" onClick={() => { commands.overlayFocus().catch(() => {}); inputRef.current?.focus(); }}>
-              <div className="rounded-2xl border border-white/12 bg-white/[0.06] px-3.5 pt-2.5 pb-2">
-                <input
-                  ref={inputRef}
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  onFocus={() => { commands.overlayFocus().catch(() => {}); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      void runAssist(null);
-                    }
-                  }}
-                  placeholder="Ask anything… (Press Enter or ⌘↵ to send)"
-                  className="w-full bg-transparent outline-none text-[13.5px] text-white/90 placeholder:text-white/40" />
-                <div className="flex items-center gap-1 mt-1.5">
-                  <button onClick={() => setSmartMode((v) => !v)} title={smartMode ? 'Smart model (slower, stronger)' : 'Fast model'}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[12px] border ${smartMode ? 'bg-blue-600/80 border-blue-500/50 text-white' : 'bg-white/5 border-white/10 text-white/60 hover:text-white/85'}`}>
-                    <span>⚡</span> Smart
-                  </button>
-                  <div className="relative">
-                    <button onClick={() => setMenuOpen((v) => !v)} title="More"
-                      className="px-2 py-1 rounded-full text-white/50 hover:text-white/85 hover:bg-white/10 text-[13px]">···</button>
-                    {menuOpen && (
-                      <div className="absolute bottom-8 left-0 w-48 rounded-xl border border-white/15 shadow-2xl py-1 text-[12.5px]" style={{ ...glass, background: 'rgba(24,26,34,0.98)' }}>
-                        {(['transcript', 'notes', 'history', 'settings'] as Panel[]).map((p) => (
-                          <button key={p} onClick={() => { setPanel(p); setMenuOpen(false); if (p === 'transcript') setShowTranscript((v) => !v); }}
-                            className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white capitalize">
-                            {p === 'transcript' ? `${showTranscript ? 'Hide' : 'Show'} transcript` : p}
-                            {p !== 'assist' && p !== 'transcript' && <span className="text-white/30"> →</span>}
-                          </button>
-                        ))}
-                        <div className="border-t border-white/10 mt-1 pt-1">
-                          <button onClick={() => { setMenuOpen(false); void toggleStealth(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white flex items-center justify-between">
-                            <span>{settings.contentProtection ? 'Deactivate stealth' : 'Activate stealth'}</span>
-                            <span className="text-[12px]">{settings.contentProtection ? '👀' : '🥷'}</span>
-                          </button>
-                          <button onClick={() => { setMenuOpen(false); void beginRegionSelect(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white">⌖ Region screenshot</button>
-                          <button onClick={() => { setMenuOpen(false); void toggleMeeting(); }} className="w-full text-left px-3 py-1.5 text-white/75 hover:bg-white/10 hover:text-white">{recording ? '■ Stop meeting' : '● Start meeting'}</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1" />
-                  {asking ? (
-                    <button onClick={cancelAssist} className="text-[12px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2.5 py-1 rounded-full transition">Cancel</button>
-                  ) : (
-                    captures.length > 0 && <span className="text-[11px] text-white/35">{captures.length} shot{captures.length > 1 ? 's' : ''}</span>
-                  )}
-                  <button onClick={() => void runAssist(null)} disabled={asking} title="Ask (⌘/Ctrl+Enter)"
-                    className="w-8 h-8 rounded-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 flex items-center justify-center text-white shadow">
-                    <span className="text-[13px] ml-0.5">▶</span>
-                  </button>
-                </div>
+            <div className="composer-context"><label htmlFor="chat-profile"><Icon name={activeProfile.icon} size={14} />Tailored for</label><select id="chat-profile" aria-label="Assistant profile" value={settings.instructionProfile} disabled={streaming || preferencesBusy} onChange={e=>void changeProfile(e.target.value)}>{PROFILES.map(profile=><option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>{settings.profileInstructions[activeProfile.id]?.trim() && <span className="personalized-badge">Personalized</span>}<button onClick={()=>openPanel('settings')} title="Edit instructions for this profile">Customize</button>{(answer || pastTurns.length > 0) && <button className="new-chat-button" disabled={streaming} onClick={newChat}>New chat <Icon name="plus" size={12} /></button>}</div>
+            <div className="composer">
+              <textarea ref={inputRef} rows={2} value={question} aria-label="Your question" onChange={(e) => setQuestion(e.target.value)} onFocus={() => { commands.overlayFocus().catch(() => {}); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!streaming) void runAssist(null); } }}
+                placeholder={recording ? 'Ask about your meeting, or anything else…' : 'Ask anything, I’m here to help…'} />
+              <div className="composer-toolbar">
+                <select aria-label="AI provider" value={settings.assistantProvider} disabled={streaming || preferencesBusy} onChange={(e) => void changeProvider(e.target.value as Provider)}>{PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                <span className="toolbar-divider" />
+                <button className={`mode-button ${smartMode ? 'smart' : ''}`} onClick={() => setSmartMode((v) => !v)} disabled={streaming} title={smartMode ? 'Smart: use your configured smart model; responses may take longer' : 'Fast: quicker responses'}><Icon name={smartMode ? 'layers' : 'timer'} size={13} />{smartMode ? 'Smart' : 'Fast'}</button>
+                <button className="icon-button capture-button" disabled={streaming} onClick={(e) => { e.stopPropagation(); void beginRegionSelect(); }} title="Capture a screen region · ⌘⇧A" aria-label="Capture a screen region"><Icon name="region" size={16} /></button>
+                <div className="composer-spacer" />
+                {streaming ? <button className="stop-button" onClick={cancelAssist} aria-label="Stop response" title="Stop response"><span /></button> : <button className="send-button" disabled={!eventsReady || preferencesBusy} onClick={() => void runAssist(null)} title="Send · Enter" aria-label="Send question"><Icon name="arrow" size={18} /></button>}
               </div>
             </div>
-          </>
-        )}
-
-        {/* Secondary panels render inside the same card */}
-        {panel !== 'assist' && (
-          <div className="flex flex-col min-h-0 max-h-[420px]">
-            <div className="flex items-center gap-2 px-4 pt-3 pb-1">
-              <button onClick={() => setPanel('assist')} className="text-white/50 hover:text-white/90 text-[13px]">← Assist</button>
-              <span className="text-[13px] text-white/80 capitalize">{panel === 'transcript' ? 'Transcript' : panel}</span>
-            </div>
-            {panel === 'transcript' && <TranscriptView lines={lines} recording={recording} />}
-            {panel === 'notes' && (
-              <NotesPanel notes={notes} generating={notesGenerating} disabled={lines.filter((l) => l.isFinal).length === 0} onGenerate={() => void generateNotes()} />
-            )}
-            {panel === 'history' && (
-              <HistoryPanel rows={history} selected={selected} searching={historySearching}
-                onSearch={(q) => void searchHistory(q)} onSelect={(id) => void selectMeeting(id)}
-                onDelete={(id) => void deleteMeeting(id)} onRefresh={() => void refreshHistory()} />
-            )}
-            {panel === 'settings' && (
-              <SettingsPanel
-                settings={settings}
-                keyHas={keyHas}
-                models={models}
-                modelsLoading={modelsLoading}
-                keyMsg={keyMsg}
-                onSave={async (s) => {
-                  await commands.settingsSet(s);
-                  setSettings(s);
-                  await commands.registerHotkeys(s.hotkeys);
-                }}
-                onLoadModels={async () => {
-                  setModelsLoading(true);
-                  try {
-                    setModels(await commands.modelsList());
-                  } catch (e) {
-                    setKeyMsg(String(e));
-                  } finally {
-                    setModelsLoading(false);
-                  }
-                }}
-                onSetKey={async (k) => {
-                  try {
-                    await commands.keySet(k);
-                    setKeyHas(true);
-                    setKeyMsg('✓ Key saved securely.');
-                    setErr(null);
-                    setModelsLoading(true);
-                    try {
-                      setModels(await commands.modelsList());
-                    } catch (e) {
-                      setKeyMsg(`Key saved, but model test failed: ${e}`);
-                    } finally {
-                      setModelsLoading(false);
-                    }
-                  } catch (e) {
-                    setKeyMsg(`Failed to save key: ${e}`);
-                  }
-                }}
-                onClearKey={async () => {
-                  await commands.keyClear();
-                  setKeyHas(false);
-                  setModels([]);
-                  setKeyMsg('Key removed.');
-                }}
-                onTestKey={async () => {
-                  try {
-                    setKeyMsg(await commands.keyTest());
-                  } catch (e) {
-                    setKeyMsg(String(e));
-                  }
-                }}
-              />
-            )}
+            <footer className="composer-footer"><span><span className={`status-dot ${eventsReady ? 'ready' : ''}`} />{eventsReady ? (recording ? 'Meeting context connected' : 'Ready when you are') : 'Connecting…'}</span><span>{firstTokenSeconds !== null ? `First text in ${firstTokenSeconds.toFixed(1)}s` : 'Enter to send · ⇧ Enter for a new line'}</span></footer>
           </div>
-        )}
+        </> : <div className="secondary-panel">
+          <div className="panel-heading"><div><p className="eyebrow">YOUR WORKSPACE</p><h1>{panel === 'diagnostics' ? 'Diagnostics' : panel === 'settings' ? 'Make yourself at home' : panel.charAt(0).toUpperCase() + panel.slice(1)}</h1></div><button className="back-button" onClick={() => openPanel('assist')}>Back to companion <span>esc</span></button></div>
+          {panel === 'transcript' && <TranscriptView lines={lines} recording={recording} />}
+          {panel === 'notes' && <NotesPanel notes={notes} generating={notesGenerating} disabled={recording || lines.filter((l) => l.isFinal).length === 0} onGenerate={() => void generateNotes()} />}
+          {panel === 'history' && <HistoryPanel entries={historyEntries} selected={selected} query={historyQuery} searching={historySearching} loading={historyLoading} busy={streaming} onQuery={q=>{setHistoryQuery(q);void searchHistory(q);}} onSelect={entry=>void selectHistory(entry)} onDelete={deleteHistory} onRefresh={()=>void refreshHistory()} onContinue={continueChat} onBack={()=>setSelected(null)} />}
+          {panel === 'diagnostics' && <DiagnosticsPanel />}
+          {panel === 'settings' && <SettingsPanel settings={settings} onClose={() => openPanel('assist')} onSave={async (s) => { const interactive = { ...s, clickThrough: false }; await commands.settingsSet(interactive); setSettings(interactive); await commands.registerHotkeys(s.hotkeys); }} />}
+          {panel === 'settings' && <button className="diagnostics-link" onClick={() => openPanel('diagnostics')}>Troubleshooting? Open diagnostics <span>↗</span></button>}
+        </div>}
 
-        {/* Error bar */}
-        {err && (
-          <div className="px-4 py-2 border-t border-red-400/20 bg-red-500/15 text-[12px] text-red-200 break-words max-h-24 overflow-y-auto flex items-center justify-between gap-2">
-            <span className="flex-1">{err.replace(/^Error:\s*/, '')}</span>
-            <div className="flex items-center gap-1.5 shrink-0">
-              {(err.toLowerCase().includes('settings') || err.toLowerCase().includes('key') || err.toLowerCase().includes('model')) && (
-                <button onClick={() => setPanel('settings')} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]">Open Settings</button>
-              )}
-              <button onClick={() => setErr(null)} className="px-1.5 py-0.5 rounded text-white/50 hover:text-white text-[11px]" title="Dismiss">✕</button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Region selector overlays everything while active */}
+        {err && <div role="alert" className="error-notice"><div><strong>Let’s get this sorted</strong><p>{err.replace(/^Error:\s*/, '')}</p></div><div className="error-actions"><button onClick={() => openPanel('diagnostics')}>View logs</button><button onClick={() => openPanel('settings')}>Settings</button><button className="icon-button" onClick={() => setErr(null)} aria-label="Dismiss error"><Icon name="close" size={14} /></button></div></div>}
+      </main>
       {selector && <RegionSelector sel={selector} onDone={(r) => void finishRegionSelect(r)} />}
     </div>
   );

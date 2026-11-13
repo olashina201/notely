@@ -1,6 +1,6 @@
 //! Tauri commands: the only bridge between webview UI and the Rust backend.
 //! The API key never leaves Rust; the frontend only gets success/failure.
-use crate::{assist, audio, db, gemini, live, notes, settings, vision};
+use crate::{assist, audio, db, diagnostics::{self, Trace}, gemini, live, notes, providers::{self, Provider, Prompt}, settings, vision};
 use crate::state::{events, AssistRequest, CapturedImage, Settings, TranscriptLine};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -26,10 +26,13 @@ pub async fn settings_get(app: AppHandle, store: State<'_, settings::SettingsSto
     Ok(store.get())
 }
 #[tauri::command]
-pub async fn settings_set(app: AppHandle, store: State<'_, settings::SettingsStore>, s: Settings) -> Result<(), String> {
+pub async fn settings_set(app: AppHandle, store: State<'_, settings::SettingsStore>, mut s: Settings) -> Result<(), String> {
+    // Saving Settings must always leave its navigation clickable.
+    s.click_through = false;
     settings::save_settings(&app, &s)?;
     store.update(s.clone());
     apply_window_prefs(&app, &s);
+    diagnostics::record("info", "settings.saved", None, serde_json::json!({"provider": s.assistant_provider.id()}));
     Ok(())
 }
 fn apply_window_prefs(app: &AppHandle, s: &Settings) {
@@ -43,67 +46,132 @@ fn apply_window_prefs(app: &AppHandle, s: &Settings) {
         }
     }
 }
-pub(crate) fn resolve_key(app: &AppHandle) -> Result<String, String> {
-    if let Ok(k) = settings::key_get() {
-        if !k.trim().is_empty() {
-            return Ok(k.trim().to_string());
-        }
+pub(crate) fn resolve_key(app: &AppHandle, provider: Provider) -> Result<String, String> {
+    if let Ok(k) = settings::key_get(provider) {
+        if !k.trim().is_empty() { return Ok(k.trim().to_string()); }
     }
-    if let Ok(path) = db::db_path(app) {
-        if let Ok(dbc) = db::open(&path) {
-            if let Ok(Some(k)) = db::get_setting(&dbc, "_api_key") {
-                if !k.trim().is_empty() {
-                    return Ok(k.trim().to_string());
+    // Read legacy Gemini installs, migrating out of SQLite only after Keychain succeeds.
+    if provider == Provider::Gemini {
+        let path = db::db_path(app)?;
+        let dbc = db::open(&path).map_err(|e| e.to_string())?;
+        if let Some(k) = db::get_setting(&dbc, "_api_key").map_err(|e| e.to_string())? {
+            if !k.trim().is_empty() {
+                if settings::key_set(provider, k.trim()).is_ok() {
+                    dbc.execute("DELETE FROM settings WHERE key = '_api_key'", []).map_err(|e| e.to_string())?;
                 }
+                return Ok(k.trim().to_string());
             }
         }
     }
-    Err("no API key set — add it in Settings".to_string())
+    Err(format!("No {} API key set — add it in Settings", provider.id()))
+}
+async fn resolve_key_async(app: AppHandle, provider: Provider) -> Result<String, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(8), tokio::task::spawn_blocking(move || resolve_key(&app, provider)))
+        .await.map_err(|_| "OS Keychain did not respond within 8 seconds. Check for a macOS access prompt and retry.")?
+        .map_err(|_| "Credential lookup worker failed")?
 }
 #[tauri::command]
-pub async fn key_has(app: AppHandle) -> Result<bool, String> { Ok(resolve_key(&app).is_ok()) }
+pub async fn key_has(app: AppHandle, provider: Provider) -> Result<bool, String> {
+    Ok(resolve_key_async(app, provider).await.is_ok())
+}
 #[tauri::command]
-pub async fn key_set(app: AppHandle, key: String) -> Result<(), String> {
-    let trimmed = key.trim();
-    let _ = settings::key_set(trimmed);
-    if let Ok(path) = db::db_path(&app) {
-        if let Ok(dbc) = db::open(&path) {
-            let _ = db::set_setting(&dbc, "_api_key", trimmed);
-        }
+pub async fn key_set(app: AppHandle, provider: Provider, key: String) -> Result<(), String> {
+    diagnostics::record("info", "credentials.save_started", None, serde_json::json!({"provider": provider.id()}));
+    tokio::task::spawn_blocking(move || settings::key_set(provider, &key)).await.map_err(|_| "Credential storage worker failed")??;
+    diagnostics::record("info", "credentials.saved", None, serde_json::json!({"provider": provider.id()}));
+    if provider == Provider::Gemini {
+        let dbc = db::open(&db::db_path(&app)?).map_err(|e| e.to_string())?;
+        dbc.execute("DELETE FROM settings WHERE key = '_api_key'", []).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 #[tauri::command]
-pub async fn key_clear(app: AppHandle) -> Result<(), String> {
-    let _ = settings::key_clear();
-    if let Ok(path) = db::db_path(&app) {
-        if let Ok(dbc) = db::open(&path) {
-            let _ = db::set_setting(&dbc, "_api_key", "");
-        }
+pub async fn key_clear(app: AppHandle, provider: Provider) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || settings::key_clear(provider)).await.map_err(|_| "Credential removal worker failed")??;
+    diagnostics::record("info", "credentials.removed", None, serde_json::json!({"provider": provider.id()}));
+    if provider == Provider::Gemini {
+        let dbc = db::open(&db::db_path(&app)?).map_err(|e| e.to_string())?;
+        dbc.execute("DELETE FROM settings WHERE key = '_api_key'", []).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 #[tauri::command]
-pub async fn key_test(app: AppHandle) -> Result<String, String> {
-    let key = resolve_key(&app)?;
-    let models = gemini::list_models(&key).await?;
-    let live_ok = models.iter().any(|m| m.id.contains("live"));
-    Ok(format!("OK: {} models listed, live-capable model {}", models.len(), if live_ok { "found" } else { "NOT found" }))
+pub async fn key_test(app: AppHandle, provider: Provider, model: String) -> Result<String, String> {
+    diagnostics::record("info", "connection_test.started", None, serde_json::json!({"provider": provider.id(), "model": model}));
+    let key = resolve_key_async(app.clone(), provider).await?;
+    validate_model(&model)?;
+    let started = std::time::Instant::now();
+    providers::complete(provider, &key, &Prompt {
+        model: &model, system: "Reply briefly.", context: "", question: "Reply with OK.",
+        images: &[], smart: false, thinking: "off", grounding: false, json: false,
+    }).await?;
+    Ok(format!("{} / {} responded in {:.1}s", provider.id(), model, started.elapsed().as_secs_f32()))
 }
 #[tauri::command]
-pub async fn models_list(app: AppHandle) -> Result<Vec<gemini::ModelInfo>, String> {
-    let key = resolve_key(&app)?;
-    gemini::list_models(&key).await
+pub async fn models_list(app: AppHandle, provider: Provider) -> Result<Vec<gemini::ModelInfo>, String> {
+    let key = resolve_key_async(app.clone(), provider).await?;
+    providers::list_models(provider, &key).await
+}
+fn validate_model(model: &str) -> Result<(), String> {
+    if model.is_empty() || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._:".contains(&c)) {
+        return Err("Enter a valid model ID in Settings".into());
+    }
+    Ok(())
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPermission { granted: bool, platform: &'static str }
+fn screen_permission_status() -> ScreenPermission {
+    ScreenPermission { granted: vision::screen_permission(), platform: if cfg!(target_os = "macos") { "macos" } else { "other" } }
+}
+#[tauri::command]
+pub fn screen_permission_get() -> ScreenPermission { screen_permission_status() }
+#[tauri::command]
+pub async fn screen_permission_request(app: AppHandle) -> Result<ScreenPermission, String> {
+    if vision::screen_permission() { return Ok(screen_permission_status()); }
+    crate::overlay::set_hidden(&app, true)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || { let _ = sender.send(vision::request_screen_permission()); }).map_err(|e| e.to_string())?;
+    let granted = tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await
+        .map_err(|_| "macOS is waiting for a Screen Recording permission decision. Check System Settings.")?
+        .map_err(|_| "Screen Recording permission request failed")?;
+    if granted { crate::overlay::set_hidden(&app, false)?; }
+    diagnostics::record("info", "capture.permission_requested", None, serde_json::json!({"granted": granted}));
+    Ok(screen_permission_status())
+}
+#[tauri::command]
+pub async fn screen_permission_open_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::overlay::set_hidden(&app, true)?;
+        tokio::task::spawn_blocking(|| std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").status())
+            .await.map_err(|_| "Could not open macOS Settings")?.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = app; Err("Open your operating system's screen capture permissions manually".into()) }
+}
+
+pub(crate) async fn capture_with_timeout<F>(capture: F) -> Result<CapturedImage, String>
+where F: FnOnce() -> Result<CapturedImage, String> + Send + 'static {
+    vision::ensure_screen_permission()?;
+    diagnostics::record("info", "capture.worker_started", None, serde_json::json!({}));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(12), tokio::task::spawn_blocking(capture)).await
+        .map_err(|_| "Screen capture timed out after 12 seconds. Check Screen Recording permission in Settings.")?
+        .map_err(|_| "Screen capture worker failed")?;
+    diagnostics::record(if result.is_ok() { "info" } else { "error" }, "capture.worker_finished", None, serde_json::json!({"success": result.is_ok()}));
+    result
 }
 #[tauri::command]
 pub async fn capture_full_cmd(app: AppHandle, monitor_index: Option<usize>, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<CapturedImage, String> {
-    let img = vision::capture_full(monitor_index)?;
+    let img = capture_with_timeout(move || vision::capture_full(monitor_index)).await?;
     push_capture(&app, &store, &meeting, img.clone());
     Ok(img)
 }
 #[tauri::command]
 pub async fn capture_active_cmd(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<CapturedImage, String> {
-    let img = vision::capture_active_window()?;
+    let img = capture_with_timeout(vision::capture_active_window).await?;
     push_capture(&app, &store, &meeting, img.clone());
     Ok(img)
 }
@@ -124,6 +192,7 @@ pub async fn capture_clear(meeting: State<'_, MeetingState>) -> Result<(), Strin
 }
 #[tauri::command]
 pub async fn selector_begin(app: AppHandle) -> Result<serde_json::Value, String> {
+    vision::ensure_screen_permission()?;
     let Some(w) = app.get_webview_window("overlay") else { return Err("no overlay window".into()) };
     let monitors = vision::list_monitors()?;
     let Some(current) = w.current_monitor().map_err(|e| e.to_string())? else {
@@ -170,8 +239,7 @@ pub async fn selector_begin(app: AppHandle) -> Result<serde_json::Value, String>
     let _ = w.set_content_protected(true);
     let _ = w.set_always_on_top(true);
     let _ = w.set_visible_on_all_workspaces(true);
-    let _ = w.show();
-    let _ = w.set_focus();
+    crate::overlay::set_hidden(&app, false)?;
     Ok(serde_json::json!({
         "monitors": monitors,
         "saved": {"x": saved_pos.x, "y": saved_pos.y, "w": saved_size.width, "h": saved_size.height},
@@ -206,7 +274,7 @@ pub async fn selector_end(app: AppHandle, saved: Option<serde_json::Value>) -> R
 pub async fn monitors_list() -> Result<Vec<vision::MonitorInfo>, String> { vision::list_monitors() }
 #[tauri::command]
 pub async fn capture_region_cmd(app: AppHandle, x: i32, y: i32, w: u32, h: u32, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<CapturedImage, String> {
-    let img = vision::capture_region(x, y, w, h)?;
+    let img = capture_with_timeout(move || vision::capture_region(x, y, w, h)).await?;
     push_capture(&app, &store, &meeting, img.clone());
     Ok(img)
 }
@@ -216,14 +284,10 @@ pub async fn meeting_start(app: AppHandle, store: State<'_, settings::SettingsSt
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
         if m.recording { return Err("already recording".into()); }
     }
-    let key = resolve_key(&app)?;
+    diagnostics::record("info", "meeting.start_requested", None, serde_json::json!({}));
+    let key = resolve_key_async(app.clone(), Provider::Gemini).await?;
     let s = store.get();
     let started_at = chrono::Utc::now().timestamp_millis();
-    let meeting_id = {
-        let path = db::db_path(&app)?;
-        let dbc = db::open(&path).map_err(|e| e.to_string())?;
-        db::insert_meeting(&dbc, "Meeting", &s.instruction_profile, started_at).map_err(|e| e.to_string())?
-    };
     // Mixer tags mic "me" + system "other" and forwards into the Live session.
     // System audio may be absent (stock macOS): meeting still runs, mic-only.
     let (live_tx, live_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<i16>)>();
@@ -232,7 +296,18 @@ pub async fn meeting_start(app: AppHandle, store: State<'_, settings::SettingsSt
         let _ = app.emit(events::ERROR, serde_json::json!({"message": w}));
     }
     let summary = meeting.0.lock().map(|m| m.summary_context.clone()).unwrap_or_default();
-    let live = live::spawn_live_session(app.clone(), live::LiveConfig { api_key: key, model: s.live_model.clone(), language: s.language.clone() }, summary, live_rx, live_tx)?;
+    let live = match live::spawn_live_session(app.clone(), live::LiveConfig { api_key: key, model: s.live_model.clone(), language: s.language.clone() }, summary, live_rx, live_tx) {
+        Ok(live) => live,
+        Err(error) => { mixer.stop(); return Err(error); }
+    };
+    let meeting_id = match (|| -> Result<i64, String> {
+        let path = db::db_path(&app)?;
+        let dbc = db::open(&path).map_err(|e| e.to_string())?;
+        db::insert_meeting(&dbc, "Meeting", &s.instruction_profile, started_at).map_err(|e| e.to_string())
+    })() {
+        Ok(id) => id,
+        Err(error) => { mixer.stop(); live.stop(); return Err(error); }
+    };
     {
         let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
         m.mixer = Some(mixer);
@@ -276,6 +351,11 @@ pub async fn meeting_stop(app: AppHandle, meeting: State<'_, MeetingState>) -> R
     };
     let _ = app.emit(events::TRANSCRIPT_STATUS, serde_json::json!({"status": "idle"}));
     if transcript.is_empty() {
+        if let Some(id) = meeting_id {
+            let path = db::db_path(&app)?;
+            let dbc = db::open(&path).map_err(|e| e.to_string())?;
+            db::delete_meeting(&dbc, id).map_err(|e| e.to_string())?;
+        }
         return Ok(serde_json::json!({"empty": true}));
     }
     if let Some(id) = meeting_id {
@@ -289,18 +369,20 @@ pub async fn meeting_stop(app: AppHandle, meeting: State<'_, MeetingState>) -> R
         m.started_at = started_at;
         m.transcript = transcript.clone();
     }
+    diagnostics::record("info", "meeting.saved", None, serde_json::json!({"lines": transcript.len()}));
     Ok(serde_json::json!({"saved": true, "lines": transcript.len()}))
 }
 #[tauri::command]
 pub async fn notes_generate(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<serde_json::Value, String> {
-    let key = resolve_key(&app)?;
     let s = store.get();
+    let key = resolve_key_async(app.clone(), s.assistant_provider).await?;
+    validate_model(s.assistant_model(true))?;
     let (id, transcript) = {
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        (m.meeting_id, m.transcript.clone())
+        { if m.recording { return Err("End the meeting before generating notes.".into()); } (m.meeting_id, m.transcript.clone()) }
     };
     if transcript.is_empty() { return Err("no transcript to summarize".into()); }
-    let notes = notes::generate_notes(&key, &s.smart_model, &transcript, &s.instruction_profile).await?;
+    let notes = notes::generate_notes(s.assistant_provider, &key, s.assistant_model(true), &transcript, &s.instruction_profile).await?;
     if let Some(id) = id {
         let path = db::db_path(&app)?;
         let dbc = db::open(&path).map_err(|e| e.to_string())?;
@@ -312,43 +394,83 @@ pub async fn notes_generate(app: AppHandle, store: State<'_, settings::SettingsS
 }
 #[tauri::command]
 pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>, req: AssistRequest) -> Result<(), String> {
-    assist::nlog(&format!("assist_run called: question='{}', slot='{}'", req.question, req.slot));
-    let key = match resolve_key(&app) {
-        Ok(k) => k,
-        Err(e) => {
-            assist::nlog(&format!("resolve_key error: {e}"));
-            return Err(e);
-        }
-    };
+    if req.request_id.is_empty() { return Err("Missing request ID".into()); }
     let s = store.get();
-    let model = if req.slot == "smart" { s.smart_model.clone() } else { s.fast_model.clone() };
-    assist::nlog(&format!("using model='{}', key_len={}", model, key.len()));
+    let mut req = req;
+    req.custom_instructions = Some(s.instructions_for(&req.profile_id));
+    let provider = s.assistant_provider;
+    let model = s.assistant_model(req.slot == "smart").to_string();
+    let id = req.request_id.clone();
+    let conversation_id = req.conversation_id.clone().unwrap_or_else(|| id.clone());
+    let saved_profile = req.profile_id.clone();
+    let saved_question = if req.question.trim().is_empty() {
+        match req.preset.as_deref() { Some("screen") => "Analyze screen", Some("say") => "What should I say?", Some("followup") => "Follow-up questions", Some("recap") => "Recap", _ => "New question" }.to_string()
+    } else { req.question.clone() };
+    let trace = Trace::new(&id, provider.id(), &model);
+    trace.log("info", "request.received", serde_json::json!({"slot": req.slot, "includeScreenshot": req.include_screenshot}));
+    validate_model(&model)?;
     let (transcript, existing_imgs) = {
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        (m.transcript.clone(), m.captures.clone())
+        (m.transcript.clone(), if req.include_screenshot { m.captures.clone() } else { Vec::new() })
     };
-    let app2 = app.clone();
+    let overall_limit = if req.include_screenshot { 110 } else { 75 };
+    let cancel = assist::begin_request(&id);
     tauri::async_runtime::spawn(async move {
-        let mut images = existing_imgs;
-        if req.include_screenshot && images.is_empty() && s.auto_attach_screenshot {
-            if let Ok(Ok(Ok(img))) = tokio::time::timeout(
-                std::time::Duration::from_millis(1500),
-                tokio::task::spawn_blocking(|| vision::capture_full(None))
-            ).await {
-                images.push(img);
+        let result = assist::run_bounded(cancel, std::time::Duration::from_secs(overall_limit), async {
+            trace.log("info", "credentials.lookup_started", serde_json::json!({}));
+            let key = match resolve_key_async(app.clone(), provider).await {
+                Ok(key) => key,
+                Err(error) => {
+                    trace.log("error", "credentials.lookup_failed", serde_json::json!({"kind": diagnostics::failure_kind(&error)}));
+                    return Err(error);
+                }
+            };
+            trace.log("info", "credentials.lookup_finished", serde_json::json!({"available": true}));
+            let mut images = existing_imgs;
+            if req.include_screenshot && images.is_empty() && s.auto_attach_screenshot {
+                trace.log("info", "capture.started", serde_json::json!({}));
+                images.push(capture_with_timeout(|| vision::capture_full(None)).await?);
+                trace.log("info", "capture.finished", serde_json::json!({"images": images.len()}));
             }
-        }
-        let recent: Vec<CapturedImage> = images.into_iter().rev().take(4).rev().collect();
-        if let Err(e) = assist::run_assist(app2.clone(), key, model, req, transcript, recent, s.thinking_level.clone(), s.search_grounding).await {
-            assist::nlog(&format!("assist_run background error: {e}"));
-            assist::emit_all(&app2, events::ERROR, serde_json::json!({"message": e}));
-            assist::emit_all(&app2, events::ASSIST_DONE, serde_json::json!({"error": e}));
-        }
+            let recent: Vec<_> = images.into_iter().rev().take(4).rev().collect();
+            let original_bytes = recent.iter().map(|i| i.data_base64.len() * 3 / 4).sum::<usize>();
+            let smart = req.slot == "smart";
+            let recent = tokio::task::spawn_blocking(move || recent.into_iter().map(|image| vision::prepare_for_assist(image, smart)).collect::<Result<Vec<_>, String>>())
+                .await.map_err(|_| "Screenshot preparation worker failed")??;
+            trace.log("info", "capture.prepared", serde_json::json!({"images": recent.len(), "imageBytesBefore": original_bytes, "imageBytes": recent.iter().map(|i| i.data_base64.len() * 3 / 4).sum::<usize>()}));
+            assist::run_assist(app.clone(), provider, key, model.clone(), req, transcript, recent, s.thinking_level, s.search_grounding, &trace).await
+        }).await;
+        let payload = match result {
+            Ok(Some(answer)) => {
+                let saved = (|| -> Result<(), String> {
+                    let path = db::db_path(&app)?;
+                    let dbc = db::open(&path).map_err(|e| e.to_string())?;
+                    db::save_chat_turn(&dbc, &conversation_id, &db::ChatTurn {
+                        request_id: id.clone(), question: saved_question, answer,
+                        profile_id: saved_profile, provider: provider.id().into(), model: model.clone(),
+                        created_at: chrono::Utc::now().timestamp_millis(),
+                    }).map_err(|e| e.to_string())
+                })();
+                if saved.is_err() { trace.log("error", "history.save_failed", serde_json::json!({})); }
+                trace.log("info", "request.completed", serde_json::json!({}));
+                serde_json::json!({"requestId": id, "historySaved": saved.is_ok()})
+            }
+            Ok(None) => {
+                trace.log("info", "request.cancelled", serde_json::json!({}));
+                serde_json::json!({"requestId": id, "cancelled": true})
+            }
+            Err(error) => {
+                trace.log("error", "request.failed", serde_json::json!({"kind": diagnostics::failure_kind(&error)}));
+                serde_json::json!({"requestId": id, "error": error})
+            }
+        };
+        assist::emit_all(&app, events::ASSIST_DONE, payload);
+        assist::finish_request(&id);
     });
     Ok(())
 }
 #[tauri::command]
-pub async fn assist_cancel() -> Result<(), String> { assist::cancel_current(); Ok(()) }
+pub async fn assist_cancel(request_id: String) -> Result<(), String> { assist::cancel_request(&request_id); Ok(()) }
 #[tauri::command]
 pub async fn history_list(app: AppHandle, limit: Option<i64>) -> Result<Vec<db::MeetingRow>, String> {
     let path = db::db_path(&app)?;
@@ -375,38 +497,19 @@ pub async fn history_delete(app: AppHandle, id: i64) -> Result<(), String> {
 }
 #[tauri::command]
 pub async fn overlay_hide(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("overlay") { w.hide().map_err(|e| e.to_string())?; }
-    Ok(())
+    crate::overlay::set_hidden(&app, true)
 }
 #[tauri::command]
 pub async fn overlay_show(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.show();
-        crate::make_window_always_on_top(&w);
-        let _ = w.set_focus();
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(ptr) = w.ns_window() {
-                if !ptr.is_null() {
-                    let ptr_val = ptr as usize;
-                    let _ = w.app_handle().run_on_main_thread(move || {
-                        unsafe {
-                            crate::notely_focus_window(ptr_val as *mut std::ffi::c_void);
-                        }
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
+    crate::overlay::set_hidden(&app, false)
 }
 #[tauri::command]
 pub async fn overlay_toggle_clickthrough(app: AppHandle) -> Result<bool, String> {
-    let s = app.state::<settings::SettingsStore>().get();
-    let next = !s.click_through;
-    app.state::<settings::SettingsStore>().modify(|x| x.click_through = next);
-    if let Some(w) = app.get_webview_window("overlay") { w.set_ignore_cursor_events(next).map_err(|e| e.to_string())?; }
-    Ok(next)
+    crate::overlay::toggle_clickthrough(&app)
+}
+#[tauri::command]
+pub async fn overlay_interactive(app: AppHandle) -> Result<(), String> {
+    crate::overlay::set_clickthrough(&app, false)
 }
 #[tauri::command]
 pub async fn overlay_toggle_stealth(app: AppHandle) -> Result<bool, String> {
@@ -468,4 +571,23 @@ pub async fn overlay_focus(app: AppHandle) -> Result<(), String> {
 pub async fn register_hotkeys_cmd(app: AppHandle, hotkeys: std::collections::HashMap<String, String>) -> Result<(), String> {
     crate::register_hotkeys(&app, &hotkeys);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn chats_list(app: AppHandle, query: Option<String>) -> Result<Vec<db::ChatSummary>, String> {
+    let path = db::db_path(&app)?;
+    let dbc = db::open(&path).map_err(|e| e.to_string())?;
+    db::list_chats(&dbc, query.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn chats_get(app: AppHandle, id: String) -> Result<Vec<db::ChatTurn>, String> {
+    let path = db::db_path(&app)?;
+    let dbc = db::open(&path).map_err(|e| e.to_string())?;
+    db::chat_turns(&dbc, &id).map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn chats_delete(app: AppHandle, id: String) -> Result<(), String> {
+    let path = db::db_path(&app)?;
+    let dbc = db::open(&path).map_err(|e| e.to_string())?;
+    db::delete_chat(&dbc, &id).map_err(|e| e.to_string())
 }

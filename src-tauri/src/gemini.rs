@@ -1,41 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// Model IDs live here and ONLY here. Google retires and renames models often;
-/// Settings model pickers are populated from the live models list endpoint.
+/// Default Gemini models; users can select available IDs in Settings.
 pub const FALLBACK_LIVE_MODEL: &str = "gemini-2.0-flash-live-001";
 pub const FALLBACK_FAST_MODEL: &str = "gemini-3.1-flash-lite";
 pub const FALLBACK_SMART_MODEL: &str = "gemini-3.1-flash-lite";
-
-const REST_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
-
-/// GET /v1beta/models — used to populate the Settings model pickers.
-pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>, String> {
-    let url = format!("{REST_BASE}/models?pageSize=100&key={api_key}");
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("models request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("models list failed ({status}): {t}", t = truncate(&body, 300)));
-    }
-    let body: ModelsResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("models parse failed: {e}"))?;
-    Ok(body
-        .models
-        .into_iter()
-        .map(|m| ModelInfo {
-            id: m.name.trim_start_matches("models/").to_string(),
-            display_name: m.display_name.unwrap_or_default(),
-            methods: m.supported_generation_methods,
-        })
-        .collect())
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,29 +11,6 @@ pub struct ModelInfo {
     pub id: String,
     pub display_name: String,
     pub methods: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    #[serde(default)]
-    models: Vec<RestModel>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RestModel {
-    name: String,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    supported_generation_methods: Vec<String>,
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..n])
-    }
 }
 
 /// Build the multimodal generateContent body shared by Assist and notes.
@@ -92,17 +37,16 @@ pub fn build_contents(
 }
 
 /// generationConfig for a slot. Fast = no thinkingConfig (avoids HTTP 400), Smart = more thinking.
-pub fn generation_config(slot: &str, thinking_level: &str, json_mode: bool) -> serde_json::Value {
-    let budget: Option<i32> = match (slot, thinking_level) {
-        ("fast", _) => None,
-        (_, "off") => None,
-        (_, "low") => Some(0),
-        (_, "high") => Some(1024),
-        _ => None,
-    };
-    let mut cfg = serde_json::json!({ "temperature": 0.7 });
-    if let Some(b) = budget {
-        cfg["thinkingConfig"] = serde_json::json!({ "thinkingBudget": b });
+pub fn generation_config(model: &str, slot: &str, thinking_level: &str, json_mode: bool) -> serde_json::Value {
+    // Let the selected model use its own reasoning/sampling defaults. In particular,
+    // the old "low" setting must not send thinkingBudget: 0 and disable reasoning.
+    let mut cfg = serde_json::json!({});
+    if slot == "smart" && thinking_level == "high" {
+        if model.starts_with("gemini-3") {
+            cfg["thinkingConfig"] = serde_json::json!({ "thinkingLevel": "HIGH" });
+        } else if model.starts_with("gemini-2.5") {
+            cfg["thinkingConfig"] = serde_json::json!({ "thinkingBudget": -1 });
+        }
     }
     if json_mode {
         cfg["responseMimeType"] = serde_json::json!("application/json");
@@ -113,14 +57,6 @@ pub fn generation_config(slot: &str, thinking_level: &str, json_mode: bool) -> s
 /// POST body tool for optional Google Search grounding.
 pub fn grounding_tool(enabled: bool) -> Option<serde_json::Value> {
     enabled.then(|| serde_json::json!([{ "googleSearch": {} }]))
-}
-
-pub fn stream_url(model: &str, api_key: &str) -> String {
-    format!("{REST_BASE}/models/{model}:streamGenerateContent?alt=sse&key={api_key}")
-}
-
-pub fn generate_url(model: &str, api_key: &str) -> String {
-    format!("{REST_BASE}/models/{model}:generateContent?key={api_key}")
 }
 
 /// Extract text chunks from one SSE `data:` JSON line of streamGenerateContent.
@@ -147,17 +83,4 @@ pub fn extract_stream_text(line: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// Extract API error from an SSE `data:` JSON line if present.
-pub fn extract_stream_error(line: &str) -> Option<String> {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return None;
-    };
-    if let Some(err) = v.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown Gemini API error");
-        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        return Some(format!("API Error ({code}): {msg}"));
-    }
-    None
 }

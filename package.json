@@ -2,22 +2,25 @@
   "name": "notely",
   "version": "0.1.0",
   "private": true,
-  "description": "Notely — personal stealth meeting assistant (Tauri 2 + React + Gemini). Local-only, single Gemini API key.",
+  "description": "Notely — your macOS AI companion for conversations, screen context, and meeting notes. Gemini, OpenAI, and Claude.",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "app:build": "npm run build && cargo build --release --manifest-path src-tauri/Cargo.toml && ([ -d /Applications/Notely.app/Contents/MacOS ] || cp -R src-tauri/target/release/bundle/macos/Notely.app /Applications/) && cp src-tauri/target/release/notely /Applications/Notely.app/Contents/MacOS/notely && codesign --force --deep --sign - --identifier 'com.notely.desktop' --requirements '=designated => identifier \"com.notely.desktop\"' --entitlements src-tauri/entitlements.mac.plist /Applications/Notely.app",
-    "app:run": "npm run app:build && (killall notely 2>/dev/null || true) && open /Applications/Notely.app"
+    "app:sign": "node scripts/sign-macos.mjs",
+    "app:bundle": "npm run tauri -- build --debug --bundles app && npm run app:sign",
+    "app:build": "npm run tauri -- build --bundles app && npm run app:sign -- src-tauri/target/release/bundle/macos/Notely.app",
+    "app:run": "npm run app:build && open src-tauri/target/release/bundle/macos/Notely.app"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.0",
-    "rehype-highlight": "^7.0.0"
+    "rehype-highlight": "^7.0.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",

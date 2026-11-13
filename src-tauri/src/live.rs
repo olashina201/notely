@@ -262,9 +262,11 @@ fn emit_final(app: &AppHandle, speaker: &str, text: String, summary_context: &mu
 }
 
 fn emit_status(app: &AppHandle, status: &str) {
+    crate::diagnostics::record("info", "audio.status", None, serde_json::json!({"status": status}));
     let _ = app.emit(events::TRANSCRIPT_STATUS, serde_json::json!({ "status": status }));
 }
 
 fn emit_err(app: &AppHandle, msg: &str) {
+    crate::diagnostics::record("error", "audio.error", None, serde_json::json!({"kind": crate::diagnostics::failure_kind(msg)}));
     let _ = app.emit(events::ERROR, serde_json::json!({ "message": msg }));
 }
