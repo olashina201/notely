@@ -24,7 +24,7 @@ pub fn load_settings(app: &AppHandle) -> Settings {
         if let Ok(db) = crate::db::open(&db_path) {
             for key in [
                 "assistant_provider", "openai_fast_model", "openai_smart_model", "claude_fast_model", "claude_smart_model",
-                "live_model", "fast_model", "smart_model", "language", "overlay_opacity",
+                "transcription_provider", "openai_transcription_model", "live_model", "fast_model", "smart_model", "language", "overlay_opacity",
                 "content_protection", "click_through", "save_captures", "thinking_level",
                 "search_grounding", "auto_attach_screenshot", "instruction_profile", "custom_instructions", "profile_instructions",
             ] {
@@ -35,6 +35,8 @@ pub fn load_settings(app: &AppHandle) -> Settings {
                         "openai_smart_model" => s.openai_smart_model = v,
                         "claude_fast_model" => s.claude_fast_model = v,
                         "claude_smart_model" => s.claude_smart_model = v,
+                        "transcription_provider" => s.transcription_provider = serde_json::from_value(serde_json::json!(v)).unwrap_or_default(),
+                        "openai_transcription_model" => s.openai_transcription_model = v,
                         "live_model" => s.live_model = v,
                         "fast_model" => s.fast_model = v,
                         "smart_model" => s.smart_model = v,
@@ -60,6 +62,7 @@ pub fn load_settings(app: &AppHandle) -> Settings {
             }
         }
     }
+    if s.live_model == "gemini-2.0-flash-live-001" { s.live_model = crate::gemini::FALLBACK_LIVE_MODEL.into(); }
     s
 }
 
@@ -79,6 +82,8 @@ fn save_settings_to_db(db: &rusqlite::Connection, s: &Settings) -> Result<(), St
         ("openai_smart_model", s.openai_smart_model.clone()),
         ("claude_fast_model", s.claude_fast_model.clone()),
         ("claude_smart_model", s.claude_smart_model.clone()),
+        ("transcription_provider", s.transcription_provider.credentials().id().into()),
+        ("openai_transcription_model", s.openai_transcription_model.clone()),
         ("live_model", s.live_model.clone()),
         ("fast_model", s.fast_model.clone()),
         ("smart_model", s.smart_model.clone()),
@@ -163,6 +168,12 @@ mod tests {
         assert_eq!(saved.get("writing").unwrap(), "Warm, professional tone.");
         assert_eq!(crate::db::get_setting(&db,"custom_instructions").unwrap().unwrap(), "Use short paragraphs.");
         assert!(crate::db::get_setting(&db,"api_key").unwrap().is_none());
+        assert_eq!(crate::db::get_setting(&db,"transcription_provider").unwrap().as_deref(), Some("openai"));
+        settings.transcription_provider = crate::state::TranscriptionProvider::Gemini;
+        settings.openai_transcription_model = "custom-transcription-model".into();
+        save_settings_to_db(&db, &settings).unwrap();
+        assert_eq!(crate::db::get_setting(&db,"transcription_provider").unwrap().as_deref(), Some("gemini"));
+        assert_eq!(crate::db::get_setting(&db,"openai_transcription_model").unwrap().as_deref(), Some("custom-transcription-model"));
     }
 
     #[test]

@@ -116,7 +116,7 @@ pub fn finish_meeting(
     notes_json: Option<&str>,
 ) -> Result<(), rusqlite::Error> {
     db.execute(
-        "UPDATE meetings SET ended_at = COALESCE(ended_at, ?1), transcript_json = ?2, notes_json = ?3 WHERE id = ?4",
+        "UPDATE meetings SET ended_at = COALESCE(ended_at, ?1), transcript_json = ?2, notes_json = COALESCE(?3, notes_json) WHERE id = ?4",
         params![ended_at, transcript_json, notes_json, id],
     )?;
     Ok(())
@@ -286,5 +286,32 @@ mod history_tests {
         let context = chat_context(&db,"chat").unwrap();
         assert!(!context.contains("User: Q0\n"));assert!(context.contains("User: Q11\n"));
         assert!(context.chars().count() < 41000);
+    }
+}
+
+pub fn checkpoint_meeting(db:&Connection,id:i64,transcript:&str)->Result<(),rusqlite::Error>{
+    db.execute("UPDATE meetings SET transcript_json=?1 WHERE id=?2 AND ended_at IS NULL",params![transcript,id])?;Ok(())
+}
+pub fn save_meeting_notes(db:&Connection,id:i64,notes:&str)->Result<(),rusqlite::Error>{
+    if db.execute("UPDATE meetings SET notes_json=?1 WHERE id=?2",params![notes,id])?==0{return Err(rusqlite::Error::QueryReturnedNoRows);}
+    Ok(())
+}
+
+#[cfg(test)]
+mod meeting_tests {
+    use super::*;
+    #[test]
+    fn transcript_checkpoints_survive_restart_and_notes_do_not_change_end_time(){
+        let path=std::env::temp_dir().join(format!("notely-meeting-{}.db",uuid::Uuid::new_v4()));
+        let db=open(&path).unwrap();let id=insert_meeting(&db,"Fixture meeting","meeting",100).unwrap();
+        let transcript:Vec<_>=(0..650).map(|i|crate::state::TranscriptLine{id:format!("line-{i}"),speaker:if i%2==0{"me"}else{"other"}.into(),text:format!("Meeting detail {i}: café launch"),is_final:true,started_at:100+i}).collect();
+        let json=serde_json::to_string(&transcript).unwrap();checkpoint_meeting(&db,id,&json).unwrap();drop(db);
+        let db=open(&path).unwrap();let saved=get_meeting(&db,id).unwrap().unwrap();assert!(saved.ended_at.is_none());
+        let lines:Vec<crate::state::TranscriptLine>=serde_json::from_str(&saved.transcript_json).unwrap();assert_eq!(lines.len(),650);assert_eq!(lines[0].id,"line-0");assert_eq!(lines[649].id,"line-649");
+        finish_meeting(&db,id,900,&json,None).unwrap();
+        save_meeting_notes(&db,id,r#"{"summary":"Café launch agreed","decisions":[],"actionItems":[],"followUpEmail":""}"#).unwrap();
+        checkpoint_meeting(&db,id,"[]").unwrap(); // Late packets cannot replace a finished transcript.
+        let row=get_meeting(&db,id).unwrap().unwrap();assert_eq!(row.ended_at,Some(900));assert_eq!(row.transcript_json,json);assert!(row.notes_json.is_some());
+        drop(db);std::fs::remove_file(path).unwrap();
     }
 }

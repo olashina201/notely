@@ -1,3 +1,4 @@
+import assistantActions from './assistant-actions.json';
 // Shared frontend types mirroring the Rust backend (state.rs / db.rs / gemini.rs).
 export type Speaker = 'me' | 'other';
 export type Provider = 'gemini' | 'openai' | 'claude';
@@ -29,6 +30,7 @@ export interface AssistRequest {
   question: string;
   preset?: string | null;
   includeScreenshot: boolean;
+  includeMeeting?: boolean;
   profileId: string;
   customInstructions?: string | null;
   slot: 'fast' | 'smart';
@@ -93,6 +95,8 @@ export interface AppSettings {
   openaiSmartModel: string;
   claudeFastModel: string;
   claudeSmartModel: string;
+  transcriptionProvider: 'gemini' | 'openai';
+  openaiTranscriptionModel: string;
   liveModel: string;
   fastModel: string;
   smartModel: string;
@@ -130,12 +134,11 @@ export interface ChatTurn {
 }
 export type HistoryEntry = { kind: 'meeting'; key: string; meeting: MeetingRow } | { kind: 'chat'; key: string; chat: ChatSummary };
 
-export const PRESETS = [
-  { id: 'say', label: 'What should I say?' },
-  { id: 'followup', label: 'Follow-up questions' },
-  { id: 'recap', label: 'Recap' },
-  { id: 'screen', label: 'Analyze screen' },
-] as const;
+export interface AssistantAction {
+  id: string; label: string; description: string; icon: string;
+  scope: 'live' | 'meeting' | 'review' | 'chat' | 'screen'; needsTopic: boolean; prompt: string;
+}
+export const PRESETS = assistantActions as AssistantAction[];
 
 export const DEFAULT_HOTKEYS: Record<string, string> = {
   assist: 'CommandOrControl+Enter',
@@ -159,8 +162,8 @@ export const HOTKEY_ACTIONS = [
   { id: 'toggleClickThrough', label: 'Toggle click-through' },
   { id: 'captureRegion', label: 'Region screenshot (selector)' },
   { id: 'captureFull', label: 'Silent full screenshot' },
-  { id: 'say', label: 'Preset: What should I say?' },
+  { id: 'say', label: 'Meeting: Help me respond' },
   { id: 'followup', label: 'Preset: Follow-up questions' },
-  { id: 'recap', label: 'Preset: Recap' },
+  { id: 'recap', label: 'Meeting: Recap' },
   { id: 'screen', label: 'Preset: Analyze screen' },
 ];

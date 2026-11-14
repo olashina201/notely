@@ -1,6 +1,13 @@
 import type { CSSProperties } from 'react';
 
 const paths: Record<string, string> = {
+  search: 'M21 21l-5-5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z',
+  refresh: 'M20 7a9 9 0 1 0 1 8 M20 2v5h-5',
+  trash: 'M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7',
+  warning: 'm12 3 10 18H2L12 3Z M12 9v5 M12 17h.01',
+  activity: 'M3 12h4l3-8 4 16 3-8h4',
+  help: 'M9.5 8.5a2.5 2.5 0 1 1 4 2c-1 .7-1.5 1-1.5 2 M12 16h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',
+  'eye-off': 'm3 3 18 18 M10.6 10.6a2 2 0 0 0 2.8 2.8 M9.8 5.3A11 11 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.1 3.8 M6.2 6.2C3.6 8.1 2 12 2 12s4 7 10 7a11 11 0 0 0 5.8-1.8',
   expand: 'M8 3H3v5 M16 3h5v5 M21 16v5h-5 M8 21H3v-5',
   code: 'm8 6-6 6 6 6 M16 6l6 6-6 6 M14 3l-4 18',
   pen: 'm16 3 5 5-12 12-6 1 1-6L16 3Z M13 6l5 5',

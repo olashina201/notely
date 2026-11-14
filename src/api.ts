@@ -17,6 +17,8 @@ function listenEvent<T>(name: string, handler: (event: { payload: T }) => void):
 }
 
 export const commands = {
+  transcriptionTest: (provider: 'gemini' | 'openai', model: string, language: string) => invoke<string>('transcription_test', { provider, model, language }),
+  trayUpdate: (status: { ready: boolean; streaming: boolean; meetingBusy: boolean; selecting: boolean }) => invoke<void>('tray_update', { status }),
   diagnosticsRecent: () => invoke<DiagnosticsSnapshot>('diagnostics_recent'),
   diagnosticsClear: () => invoke<void>('diagnostics_clear'),
   diagnosticsProbe: (requestId: string) => invoke<void>('diagnostics_probe', { requestId }),
@@ -39,12 +41,12 @@ export const commands = {
   selectorBegin: () => invoke<SelectorBegin>('selector_begin'),
   selectorEnd: (saved?: { x: number; y: number; w: number; h: number } | null) =>
     invoke<void>('selector_end', { saved: saved ?? null }),
-  meetingStart: () => invoke<void>('meeting_start'),
+  meetingStart: () => invoke<{ systemAudio: boolean; transcriptionProvider: 'gemini' | 'openai' }>('meeting_start'),
   meetingStop: () => invoke<{ saved?: boolean; empty?: boolean; lines?: number }>('meeting_stop'),
   meetingTranscriptAdd: (line: TranscriptLine) => invoke<void>('meeting_transcript_add', { line }),
   assistRun: (req: AssistRequest) => invoke<void>('assist_run', { req }),
   assistCancel: (requestId: string) => invoke<void>('assist_cancel', { requestId }),
-  notesGenerate: () => invoke<Record<string, unknown>>('notes_generate'),
+  notesGenerate: (meetingId?: number) => invoke<Record<string, unknown>>('notes_generate', { meetingId: meetingId ?? null }),
   chatsList: (query = '') => invoke<ChatSummary[]>('chats_list', { query }),
   chatsGet: (id: string) => invoke<ChatTurn[]>('chats_get', { id }),
   chatsDelete: (id: string) => invoke<void>('chats_delete', { id }),
@@ -63,6 +65,7 @@ export const commands = {
 };
 
 export const events = {
+  onTrayAction: (cb: (p: { action: string }) => void) => listenEvent<{ action: string }>(eventNames.trayAction, (e) => cb(e.payload)),
   onClickthroughChanged: (cb: (p: { enabled: boolean }) => void) => listenEvent<{ enabled: boolean }>(eventNames.clickthroughChanged, (e) => cb(e.payload)),
   onDiagnosticsProbe: (cb: (p: { requestId: string }) => void) => listenEvent<{ requestId: string }>(eventNames.diagnosticsProbe, (e) => cb(e.payload)),
   onTranscriptPartial: (cb: (line: TranscriptLine) => void) => listenEvent<TranscriptLine>(eventNames.transcriptPartial, (e) => cb(e.payload)),

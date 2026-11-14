@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::providers::Provider;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptionProvider { Gemini, #[default] Openai }
+impl TranscriptionProvider {
+    pub fn credentials(self) -> Provider { match self { Self::Gemini => Provider::Gemini, Self::Openai => Provider::Openai } }
+}
+fn default_transcription_model() -> String { "gpt-live-transcribe".into() }
+
 /// App settings persisted to SQLite. The Gemini API key is NOT here — it lives in the OS keychain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +24,10 @@ pub struct Settings {
     pub claude_fast_model: String,
     #[serde(default = "default_claude_smart")]
     pub claude_smart_model: String,
+    #[serde(default)]
+    pub transcription_provider: TranscriptionProvider,
+    #[serde(default = "default_transcription_model")]
+    pub openai_transcription_model: String,
     pub live_model: String,
     pub fast_model: String,
     pub smart_model: String,
@@ -54,6 +66,8 @@ impl Default for Settings {
             openai_smart_model: default_openai_smart(),
             claude_fast_model: default_claude_fast(),
             claude_smart_model: default_claude_smart(),
+            transcription_provider: TranscriptionProvider::Openai,
+            openai_transcription_model: default_transcription_model(),
             live_model: crate::gemini::FALLBACK_LIVE_MODEL.into(),
             fast_model: crate::gemini::FALLBACK_FAST_MODEL.into(),
             smart_model: crate::gemini::FALLBACK_SMART_MODEL.into(),
@@ -127,13 +141,18 @@ pub struct AssistRequest {
     pub question: String,
     pub preset: Option<String>,
     pub include_screenshot: bool,
+    #[serde(default="default_include_meeting")]
+    pub include_meeting: bool,
     pub profile_id: String,
     pub custom_instructions: Option<String>,
     pub slot: String,
 }
 
+fn default_include_meeting()->bool { true }
+
 /// Events emitted from Rust to the webview.
 pub mod events {
+    pub const TRAY_ACTION: &str = "tray:action";
     pub const TRANSCRIPT_PARTIAL: &str = "transcript:partial";
     pub const TRANSCRIPT_FINAL: &str = "transcript:final";
     pub const TRANSCRIPT_STATUS: &str = "transcript:status";
@@ -150,12 +169,14 @@ mod tests {
     #[test]
     fn old_settings_load_and_provider_models_stay_independent() {
         let mut legacy = serde_json::to_value(Settings::default()).unwrap();
-        for field in ["assistantProvider", "openaiFastModel", "openaiSmartModel", "claudeFastModel", "claudeSmartModel", "profileInstructions"] {
+        for field in ["assistantProvider", "openaiFastModel", "openaiSmartModel", "claudeFastModel", "claudeSmartModel", "profileInstructions", "transcriptionProvider", "openaiTranscriptionModel"] {
             legacy.as_object_mut().unwrap().remove(field);
         }
         legacy["fastModel"] = serde_json::json!("my-gemini-model");
         let mut settings: Settings = serde_json::from_value(legacy).unwrap();
         assert_eq!(settings.assistant_provider, Provider::Gemini);
+        assert_eq!(settings.transcription_provider, TranscriptionProvider::Openai);
+        assert_eq!(settings.openai_transcription_model, "gpt-live-transcribe");
         assert_eq!(settings.assistant_model(false), "my-gemini-model");
         settings.assistant_provider = Provider::Openai;
         assert_eq!(settings.assistant_model(false), "gpt-4.1-mini");
@@ -184,6 +205,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let names: serde_json::Value = serde_json::from_str(include_str!("../../src/events.json")).unwrap();
         for (name, expected) in [
+            ("trayAction", events::TRAY_ACTION),
             ("transcriptPartial", events::TRANSCRIPT_PARTIAL), ("transcriptFinal", events::TRANSCRIPT_FINAL),
             ("transcriptStatus", events::TRANSCRIPT_STATUS), ("captureTaken", events::CAPTURE_TAKEN),
             ("assistChunk", events::ASSIST_CHUNK), ("assistDone", events::ASSIST_DONE), ("stealthChanged", events::STEALTH_CHANGED),

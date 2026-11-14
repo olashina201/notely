@@ -1,4 +1,5 @@
 {
+  "trayAction": "tray:action",
   "transcriptPartial": "transcript:partial",
   "transcriptFinal": "transcript:final",
   "transcriptStatus": "transcript:status",

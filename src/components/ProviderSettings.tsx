@@ -5,8 +5,8 @@ import { PROVIDERS, type AppSettings, type ModelInfo, type Provider } from '../t
 const fieldClass = 'flex-1 min-w-0 bg-white/10 border border-white/12 rounded-lg px-2 py-1.5 text-[12px] outline-none';
 const buttonClass = 'px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/10 border border-white/12 text-[12px] disabled:opacity-50';
 
-export function CredentialEditor({ provider, model, onModels }: {
-  provider: Provider; model: string; onModels?: (models: ModelInfo[]) => void;
+export function CredentialEditor({ provider, model, onModels, testConnection }: {
+  provider: Provider; model: string; onModels?: (models: ModelInfo[]) => void; testConnection?: () => Promise<string>;
 }) {
   const [hasKey, setHasKey] = React.useState(false);
   const [input, setInput] = React.useState('');
@@ -36,8 +36,8 @@ export function CredentialEditor({ provider, model, onModels }: {
         onModels?.([]);
         setMessage(`${name} key removed.`);
       } else if (action === 'test') {
-        setMessage('Testing a small AI request…');
-        setMessage(await commands.keyTest(provider, model));
+        setMessage('Testing connection…');
+        setMessage(await (testConnection ? testConnection() : commands.keyTest(provider, model)));
       } else {
         const models = await commands.modelsList(provider);
         onModels?.(models);
@@ -66,7 +66,7 @@ export function CredentialEditor({ provider, model, onModels }: {
         {onModels && <button disabled={busy || !hasKey} onClick={() => void perform('models')} className={buttonClass}>Load models</button>}
         <button disabled={busy || !hasKey} onClick={() => void perform('remove')} className={buttonClass}>Remove key</button>
       </div>
-      <div className="text-[11px] text-white/65">macOS may ask to unlock a saved key once. Notely reuses that key in memory for this session. A ChatGPT or Claude subscription alone does not supply API access.</div>
+      <div className="text-[11px] text-white/65">Your operating system may ask to unlock a saved key once. Notely reuses that key in memory for this session. A ChatGPT or Claude subscription alone does not supply API access.</div>
       {message && <div role="status" className="text-[11.5px] text-white/90 break-words">{message}</div>}
     </div>
   );

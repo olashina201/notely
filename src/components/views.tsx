@@ -33,13 +33,14 @@ export function ResponseView({ text, streaming }: { text: string; streaming: boo
   );
 }
 
-export function TranscriptView({ lines, recording }: { lines: TranscriptLine[]; recording: boolean }) {
+export function TranscriptView({ lines, recording, systemAudio, provider }: { lines: TranscriptLine[]; recording: boolean; systemAudio?: boolean | null; provider?: string }) {
   const ref = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight });
   }, [lines]);
   return (
     <div ref={ref} className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5 min-h-0">
+      {recording && <p className="text-[11px] text-white/65 py-2">{provider && <strong>{provider} transcription · </strong>}{systemAudio ? 'Capturing your microphone and system audio. “Others” identifies the system-audio source, not individual people.' : 'Microphone only. Other participants need a working system-audio input to be captured.'}</p>}
       {lines.length === 0 && (
         <div className="empty-state"><span className="empty-state-icon"><Icon name="wave" size={24} /></span><h2>{recording ? 'Listening, so you can be present' : 'Stay in the conversation'}</h2><p>{recording ? 'Speak or play meeting audio. Your transcript will appear here.' : 'Start a meeting above to see the conversation as it happens.'}</p></div>
       )}

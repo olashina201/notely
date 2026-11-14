@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Default Gemini models; users can select available IDs in Settings.
-pub const FALLBACK_LIVE_MODEL: &str = "gemini-2.0-flash-live-001";
+pub const FALLBACK_LIVE_MODEL: &str = "gemini-2.5-flash-native-audio-preview-12-2025";
 pub const FALLBACK_FAST_MODEL: &str = "gemini-3.1-flash-lite";
 pub const FALLBACK_SMART_MODEL: &str = "gemini-3.1-flash-lite";
 

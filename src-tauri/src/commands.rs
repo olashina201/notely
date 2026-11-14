@@ -7,17 +7,17 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub struct MeetingState(pub Mutex<MeetingData>);
 pub struct MeetingData {
     pub recording: bool,
+    pub starting: bool,
     pub meeting_id: Option<i64>,
     pub transcript: Vec<TranscriptLine>,
     pub captures: Vec<CapturedImage>,
     pub live: Option<live::LiveHandle>,
     pub mixer: Option<audio::Mixer>,
-    pub summary_context: String,
     pub started_at: i64,
 }
 impl Default for MeetingData {
     fn default() -> Self {
-        Self { recording: false, meeting_id: None, transcript: Vec::new(), captures: Vec::new(), live: None, mixer: None, summary_context: String::new(), started_at: 0 }
+        Self { recording: false, starting: false, meeting_id: None, transcript: Vec::new(), captures: Vec::new(), live: None, mixer: None, started_at: 0 }
     }
 }
 #[tauri::command]
@@ -32,6 +32,7 @@ pub async fn settings_set(app: AppHandle, store: State<'_, settings::SettingsSto
     settings::save_settings(&app, &s)?;
     store.update(s.clone());
     apply_window_prefs(&app, &s);
+    crate::tray::sync(&app);
     diagnostics::record("info", "settings.saved", None, serde_json::json!({"provider": s.assistant_provider.id()}));
     Ok(())
 }
@@ -122,7 +123,7 @@ fn validate_model(model: &str) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenPermission { granted: bool, platform: &'static str }
 fn screen_permission_status() -> ScreenPermission {
-    ScreenPermission { granted: vision::screen_permission(), platform: if cfg!(target_os = "macos") { "macos" } else { "other" } }
+    ScreenPermission { granted: vision::screen_permission(), platform: std::env::consts::OS }
 }
 #[tauri::command]
 pub fn screen_permission_get() -> ScreenPermission { screen_permission_status() }
@@ -278,15 +279,37 @@ pub async fn capture_region_cmd(app: AppHandle, x: i32, y: i32, w: u32, h: u32, 
     push_capture(&app, &store, &meeting, img.clone());
     Ok(img)
 }
+struct MeetingStartGuard(AppHandle);
 #[tauri::command]
-pub async fn meeting_start(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<(), String> {
-    {
-        let m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        if m.recording { return Err("already recording".into()); }
+pub async fn transcription_test(app: AppHandle, provider: crate::state::TranscriptionProvider, model: String, language: String) -> Result<String, String> {
+    validate_model(&model)?;
+    let key = resolve_key_async(app, provider.credentials()).await?;
+    let started = std::time::Instant::now();
+    diagnostics::record("info", "audio.connection_test_started", None, serde_json::json!({"provider":provider.credentials().id(),"model":model}));
+    let config = live::LiveConfig { provider, api_key: key, model, language, system_audio: false };
+    if let Err(error) = live::test_connection(&config).await {
+        diagnostics::record("error", "audio.connection_test_failed", None, serde_json::json!({"provider":provider.credentials().id(),"failureKind":diagnostics::failure_kind(&error),"elapsedMs":started.elapsed().as_millis() as u64}));
+        return Err(error);
     }
+    diagnostics::record("info", "audio.connection_test_finished", None, serde_json::json!({"provider":provider.credentials().id(),"elapsedMs":started.elapsed().as_millis() as u64,"success":true}));
+    Ok("Transcription connection ready. No microphone or screen content was sent.".into())
+}
+impl Drop for MeetingStartGuard {
+    fn drop(&mut self){if let Some(state)=self.0.try_state::<MeetingState>(){if let Ok(mut m)=state.0.lock(){m.starting=false;}}}
+}
+#[tauri::command]
+pub async fn meeting_start(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<serde_json::Value, String> {
+    {
+        let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
+        if m.recording || m.starting { return Err("A meeting is already recording or starting".into()); }
+        m.starting=true;
+    }
+    let _starting=MeetingStartGuard(app.clone());
     diagnostics::record("info", "meeting.start_requested", None, serde_json::json!({}));
-    let key = resolve_key_async(app.clone(), Provider::Gemini).await?;
     let s = store.get();
+    let key = resolve_key_async(app.clone(), s.transcription_provider.credentials()).await?;
+    let model = if s.transcription_provider == crate::state::TranscriptionProvider::Openai { s.openai_transcription_model.clone() } else { s.live_model.clone() };
+    validate_model(&model)?;
     let started_at = chrono::Utc::now().timestamp_millis();
     // Mixer tags mic "me" + system "other" and forwards into the Live session.
     // System audio may be absent (stock macOS): meeting still runs, mic-only.
@@ -295,100 +318,82 @@ pub async fn meeting_start(app: AppHandle, store: State<'_, settings::SettingsSt
     if let Some(w) = &sys_warning {
         let _ = app.emit(events::ERROR, serde_json::json!({"message": w}));
     }
-    let summary = meeting.0.lock().map(|m| m.summary_context.clone()).unwrap_or_default();
-    let live = match live::spawn_live_session(app.clone(), live::LiveConfig { api_key: key, model: s.live_model.clone(), language: s.language.clone() }, summary, live_rx, live_tx) {
-        Ok(live) => live,
-        Err(error) => { mixer.stop(); return Err(error); }
-    };
-    let meeting_id = match (|| -> Result<i64, String> {
-        let path = db::db_path(&app)?;
-        let dbc = db::open(&path).map_err(|e| e.to_string())?;
-        db::insert_meeting(&dbc, "Meeting", &s.instruction_profile, started_at).map_err(|e| e.to_string())
-    })() {
-        Ok(id) => id,
-        Err(error) => { mixer.stop(); live.stop(); return Err(error); }
-    };
+    let meeting_id = match (|| -> Result<i64,String> {
+        let path=db::db_path(&app)?;let db=db::open(&path).map_err(|e|e.to_string())?;
+        db::insert_meeting(&db,"Meeting",&s.instruction_profile,started_at).map_err(|e|e.to_string())
+    })() {Ok(id)=>id,Err(error)=>{mixer.stop();return Err(error);}};
     {
-        let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        m.mixer = Some(mixer);
-        m.live = Some(live);
+        let mut m=meeting.0.lock().map_err(|_|"Meeting state lock failed")?;
+        m.recording=true;m.meeting_id=Some(meeting_id);m.started_at=started_at;m.transcript.clear();
     }
-    {
-        let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        m.recording = true;
-        m.meeting_id = Some(meeting_id);
-        m.started_at = started_at;
-        m.transcript.clear();
+    let _=app.emit(events::TRANSCRIPT_STATUS,serde_json::json!({"status":"connecting"}));
+    let live=match live::spawn_live_session(app.clone(),live::LiveConfig{provider:s.transcription_provider,api_key:key,model,language:s.language.clone(),system_audio:sys_warning.is_none()},live_rx,live_tx) {
+        Ok(live)=>live,
+        Err(error)=>{
+            mixer.stop();
+            if let Ok(mut m)=meeting.0.lock(){m.recording=false;m.meeting_id=None;}
+            if let Ok(path)=db::db_path(&app){if let Ok(db)=db::open(&path){let _=db::delete_meeting(&db,meeting_id);}}
+            return Err(error);
+        }
+    };
+    {let mut m=meeting.0.lock().map_err(|_|"Meeting state lock failed")?;m.mixer=Some(mixer);m.live=Some(live);}
+    Ok(serde_json::json!({"systemAudio":sys_warning.is_none(),"transcriptionProvider":s.transcription_provider.credentials().id()}))
+}
+#[tauri::command]
+pub async fn meeting_transcript_add(app:AppHandle, line:TranscriptLine) -> Result<(),String> {
+    // Compatibility with older webviews. Native transcription is the primary writer.
+    persist_transcript_line(&app,&line)
+}
+pub fn persist_transcript_line(app:&AppHandle,line:&TranscriptLine) -> Result<(),String> {
+    if line.text.trim().is_empty(){return Ok(());}
+    let state=app.state::<MeetingState>();let mut m=state.0.lock().map_err(|_|"Meeting state lock failed")?;
+    if !m.recording{return Ok(());}
+    if let Some(existing)=m.transcript.iter_mut().find(|item|item.id==line.id){
+        if existing.is_final && (!line.is_final || existing.text==line.text){return Ok(());}
+        *existing=line.clone();
+    }else{m.transcript.push(line.clone());}
+    m.transcript.sort_by_key(|line| line.started_at);
+    if let Some(id)=m.meeting_id {
+        // Keep snapshot writes ordered across mic/system and compatibility callbacks.
+        let json=serde_json::to_string(&m.transcript).map_err(|e|e.to_string())?;
+        let path=db::db_path(app)?;let db=db::open(&path).map_err(|e|e.to_string())?;
+        db::checkpoint_meeting(&db,id,&json).map_err(|e|e.to_string())?;
     }
-    let _ = app.emit(events::TRANSCRIPT_STATUS, serde_json::json!({"status": "recording"}));
     Ok(())
 }
 #[tauri::command]
-pub async fn meeting_transcript_add(meeting: State<'_, MeetingState>, line: TranscriptLine) -> Result<(), String> {
-    if let Ok(mut m) = meeting.0.lock() {
-        if line.is_final {
-            m.transcript.push(line);
-        } else if let Some(last) = m.transcript.last_mut() {
-            if !last.is_final { *last = line; return Ok(()); }
-            m.transcript.push(line);
-        } else {
-            m.transcript.push(line);
-        }
-    }
-    Ok(())
+pub async fn meeting_stop(app:AppHandle,meeting:State<'_,MeetingState>)->Result<serde_json::Value,String>{
+    let (mixer,live)={let mut m=meeting.0.lock().map_err(|_|"Meeting state lock failed")?;if m.starting{return Err("Meeting is still starting".into());}(m.mixer.take(),m.live.take())};
+    // Join off the async command executor, allowing final native transcript events to save.
+    tokio::task::spawn_blocking(move||{if let Some(mixer)=mixer{mixer.stop();}if let Some(live)=live{live.stop();}}).await.map_err(|_|"Meeting shutdown failed")?;
+    let (id,transcript)={let mut m=meeting.0.lock().map_err(|_|"Meeting state lock failed")?;m.recording=false;(m.meeting_id,m.transcript.clone())};
+    let path=db::db_path(&app)?;let db=db::open(&path).map_err(|e|e.to_string())?;
+    if transcript.is_empty(){if let Some(id)=id{db::delete_meeting(&db,id).map_err(|e|e.to_string())?;}meeting.0.lock().map_err(|_|"Meeting state lock failed")?.meeting_id=None;}
+    else if let Some(id)=id{let json=serde_json::to_string(&transcript).map_err(|e|e.to_string())?;db::finish_meeting(&db,id,chrono::Utc::now().timestamp_millis(),&json,None).map_err(|e|e.to_string())?;}
+    let _=app.emit(events::TRANSCRIPT_STATUS,serde_json::json!({"status":"idle"}));
+    diagnostics::record("info","meeting.saved",None,serde_json::json!({"lines":transcript.len()}));
+    Ok(serde_json::json!({"saved":!transcript.is_empty(),"empty":transcript.is_empty(),"lines":transcript.len()}))
 }
 #[tauri::command]
-pub async fn meeting_stop(app: AppHandle, meeting: State<'_, MeetingState>) -> Result<serde_json::Value, String> {
-    // Stop capture first, then the Live session.
-    let mixer = meeting.0.lock().map(|mut m| m.mixer.take()).unwrap_or(None);
-    if let Some(mx) = mixer { mx.stop(); }
-    let live = meeting.0.lock().map(|mut m| m.live.take()).unwrap_or(None);
-    if let Some(lh) = live { lh.stop(); }
-    let (meeting_id, started_at, transcript) = {
-        let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        m.recording = false;
-        (m.meeting_id.take(), m.started_at, std::mem::take(&mut m.transcript))
-    };
-    let _ = app.emit(events::TRANSCRIPT_STATUS, serde_json::json!({"status": "idle"}));
-    if transcript.is_empty() {
-        if let Some(id) = meeting_id {
-            let path = db::db_path(&app)?;
-            let dbc = db::open(&path).map_err(|e| e.to_string())?;
-            db::delete_meeting(&dbc, id).map_err(|e| e.to_string())?;
-        }
-        return Ok(serde_json::json!({"empty": true}));
-    }
-    if let Some(id) = meeting_id {
-        let path = db::db_path(&app)?;
-        let dbc = db::open(&path).map_err(|e| e.to_string())?;
-        let ended = chrono::Utc::now().timestamp_millis();
-        let tj = serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".into());
-        db::finish_meeting(&dbc, id, ended, &tj, None).map_err(|e| e.to_string())?;
-        let mut m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        m.meeting_id = Some(id);
-        m.started_at = started_at;
-        m.transcript = transcript.clone();
-    }
-    diagnostics::record("info", "meeting.saved", None, serde_json::json!({"lines": transcript.len()}));
-    Ok(serde_json::json!({"saved": true, "lines": transcript.len()}))
-}
-#[tauri::command]
-pub async fn notes_generate(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>) -> Result<serde_json::Value, String> {
+pub async fn notes_generate(app: AppHandle, store: State<'_, settings::SettingsStore>, meeting: State<'_, MeetingState>, meeting_id: Option<i64>) -> Result<serde_json::Value, String> {
     let s = store.get();
     let key = resolve_key_async(app.clone(), s.assistant_provider).await?;
     validate_model(s.assistant_model(true))?;
-    let (id, transcript) = {
-        let m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        { if m.recording { return Err("End the meeting before generating notes.".into()); } (m.meeting_id, m.transcript.clone()) }
-    };
+    let (active_id,recording,current)={let m=meeting.0.lock().map_err(|_|"Meeting state lock failed")?;(m.meeting_id,m.recording,m.transcript.clone())};
+    let requested=meeting_id.or(active_id);
+    if recording && requested==active_id{return Err("End the meeting before generating notes.".into());}
+    let (id,transcript,profile)=if let Some(id)=requested{
+        let path=db::db_path(&app)?;let db=db::open(&path).map_err(|e|e.to_string())?;
+        let row=db::get_meeting(&db,id).map_err(|e|e.to_string())?.ok_or("Saved meeting not found")?;
+        (Some(id),serde_json::from_str::<Vec<TranscriptLine>>(&row.transcript_json).map_err(|_|"Saved transcript is invalid")?,row.profile_id)
+    }else{(active_id,current,s.instruction_profile.clone())};
     if transcript.is_empty() { return Err("no transcript to summarize".into()); }
-    let notes = notes::generate_notes(s.assistant_provider, &key, s.assistant_model(true), &transcript, &s.instruction_profile).await?;
+    let notes = notes::generate_notes(s.assistant_provider, &key, s.assistant_model(true), &transcript, &format!("{}\n{}",profile,s.instructions_for(&profile))).await?;
     if let Some(id) = id {
         let path = db::db_path(&app)?;
         let dbc = db::open(&path).map_err(|e| e.to_string())?;
-        let tj = serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".into());
-        let nj = serde_json::to_string(&notes).unwrap_or_default();
-        db::finish_meeting(&dbc, id, chrono::Utc::now().timestamp_millis(), &tj, Some(&nj)).map_err(|e| e.to_string())?;
+        let nj=serde_json::to_string(&notes).map_err(|e|e.to_string())?;
+        db::save_meeting_notes(&dbc,id,&nj).map_err(|e|e.to_string())?;
     }
     Ok(notes)
 }
@@ -403,15 +408,17 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
     let id = req.request_id.clone();
     let conversation_id = req.conversation_id.clone().unwrap_or_else(|| id.clone());
     let saved_profile = req.profile_id.clone();
-    let saved_question = if req.question.trim().is_empty() {
-        match req.preset.as_deref() { Some("screen") => "Analyze screen", Some("say") => "What should I say?", Some("followup") => "Follow-up questions", Some("recap") => "Recap", _ => "New question" }.to_string()
-    } else { req.question.clone() };
+    let saved_question=if req.question.trim().is_empty(){req.preset.as_deref().and_then(assist::action).map(|p|p.label.clone()).unwrap_or_else(||"New question".into())}else if req.preset.as_deref().and_then(assist::action).is_some_and(|p|p.needs_topic){format!("Revisit a topic: {}",req.question.trim())}else{req.question.clone()};
     let trace = Trace::new(&id, provider.id(), &model);
     trace.log("info", "request.received", serde_json::json!({"slot": req.slot, "includeScreenshot": req.include_screenshot}));
     validate_model(&model)?;
+    let is_chat_action=req.preset.as_deref().and_then(assist::action).is_some_and(|p|p.scope=="chat");
+    if is_chat_action {req.include_meeting=false;req.include_screenshot=false;}
+    let has_chat=if is_chat_action {let path=db::db_path(&app)?;let db=db::open(&path).map_err(|e|e.to_string())?;db.query_row("SELECT EXISTS(SELECT 1 FROM chat_turns WHERE conversation_id=?1)",[&conversation_id],|row|row.get::<_,bool>(0)).map_err(|e|e.to_string())?}else{false};
     let (transcript, existing_imgs) = {
         let m = meeting.0.lock().map_err(|_| "state lock failed")?;
-        (m.transcript.clone(), if req.include_screenshot { m.captures.clone() } else { Vec::new() })
+        assist::validate_action(req.preset.as_deref(),&req.question,m.recording,req.include_meeting,m.transcript.iter().any(|line|!line.text.trim().is_empty()),has_chat)?;
+        (if req.include_meeting {m.transcript.clone()}else{Vec::new()}, if req.include_screenshot { m.captures.clone() } else { Vec::new() })
     };
     let overall_limit = if req.include_screenshot { 110 } else { 75 };
     let cancel = assist::begin_request(&id);
@@ -427,7 +434,7 @@ pub async fn assist_run(app: AppHandle, store: State<'_, settings::SettingsStore
             };
             trace.log("info", "credentials.lookup_finished", serde_json::json!({"available": true}));
             let mut images = existing_imgs;
-            if req.include_screenshot && images.is_empty() && s.auto_attach_screenshot {
+            if req.include_screenshot && images.is_empty() && (s.auto_attach_screenshot || req.preset.as_deref()==Some("screen")) {
                 trace.log("info", "capture.started", serde_json::json!({}));
                 images.push(capture_with_timeout(|| vision::capture_full(None)).await?);
                 trace.log("info", "capture.finished", serde_json::json!({"images": images.len()}));
@@ -513,40 +520,13 @@ pub async fn overlay_interactive(app: AppHandle) -> Result<(), String> {
 }
 #[tauri::command]
 pub async fn overlay_toggle_stealth(app: AppHandle) -> Result<bool, String> {
-    let s = app.state::<settings::SettingsStore>().get();
-    let next = !s.content_protection;
-    app.state::<settings::SettingsStore>().modify(|x| x.content_protection = next);
-    let updated = app.state::<settings::SettingsStore>().get();
-    let _ = settings::save_settings(&app, &updated);
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.set_content_protected(next);
-        crate::make_window_always_on_top(&w);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
-    }
-    let _ = app.emit(events::STEALTH_CHANGED, serde_json::json!({ "stealth": next }));
-    Ok(next)
+    crate::overlay::toggle_protection(&app)
 }
 #[tauri::command]
 pub async fn overlay_set_stealth(app: AppHandle, enabled: bool) -> Result<bool, String> {
-    app.state::<settings::SettingsStore>().modify(|x| x.content_protection = enabled);
-    let updated = app.state::<settings::SettingsStore>().get();
-    let _ = settings::save_settings(&app, &updated);
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.set_content_protected(enabled);
-        crate::make_window_always_on_top(&w);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
-    }
-    let _ = app.emit(events::STEALTH_CHANGED, serde_json::json!({ "stealth": enabled }));
-    Ok(enabled)
+    crate::overlay::set_protection(&app, enabled)
 }
+
 #[tauri::command]
 pub async fn overlay_focus(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("overlay") {

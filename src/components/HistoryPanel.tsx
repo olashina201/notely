@@ -6,7 +6,8 @@ import { PROFILES, PROVIDERS } from '../types';
 
 export type HistorySelection = { kind: 'chat'; summary: ChatSummary; turns: ChatTurn[] } | { kind: 'meeting'; row: MeetingRow; transcript: TranscriptLine[]; notes: NotesJson | null };
 const profileName = (id: string) => PROFILES.find(p => p.id === id)?.name ?? id;
-export function HistoryPanel({ entries, selected, query, searching, loading, onQuery, onSelect, onDelete, onRefresh, onContinue, onBack, busy }: {
+export function HistoryPanel({ entries, selected, query, searching, loading, onQuery, onSelect, onDelete, onRefresh, onContinue, onBack, busy, notesGenerating, onGenerateNotes }: {
+  notesGenerating: boolean; onGenerateNotes: (id:number)=>void;
   entries: HistoryEntry[]; selected: HistorySelection | null; query: string; searching: boolean; loading: boolean; busy: boolean;
   onQuery: (q: string) => void; onSelect: (entry: HistoryEntry) => void; onDelete: (entry: HistoryEntry) => Promise<void>;
   onRefresh: () => void; onContinue: (selection: Extract<HistorySelection, {kind:'chat'}>) => void; onBack: () => void;
@@ -16,7 +17,7 @@ export function HistoryPanel({ entries, selected, query, searching, loading, onQ
   const [deleting, setDeleting] = React.useState(false);
   const visible = entries.filter(e => filter === 'all' || e.kind === filter);
   if (selected) return <div className="history-detail">
-    <div className="history-detail-toolbar"><button className="text-button" onClick={onBack}>← All history</button>{selected.kind === 'chat' && <button className="primary-small" disabled={busy} onClick={() => onContinue(selected)}>Continue this chat <Icon name="arrow" size={13} /></button>}</div>
+    <div className="history-detail-toolbar"><button className="text-button" onClick={onBack}>← All history</button>{selected.kind === 'meeting' && <button className="primary-small" disabled={busy || notesGenerating || selected.transcript.length === 0} onClick={()=>onGenerateNotes(selected.row.id)}>{notesGenerating ? 'Generating notes…' : selected.notes ? 'Regenerate notes' : 'Generate notes'}</button>}{selected.kind === 'chat' && <button className="primary-small" disabled={busy} onClick={() => onContinue(selected)}>Continue this chat <Icon name="arrow" size={13} /></button>}</div>
     <div className="history-detail-scroll">
       <p className="eyebrow">{selected.kind === 'chat' ? 'SAVED CHAT' : 'SAVED MEETING'}</p>
       <h2>{selected.kind === 'chat' ? selected.summary.title : selected.row.title}</h2>

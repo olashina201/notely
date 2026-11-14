@@ -5,10 +5,26 @@ use crate::settings::SettingsStore;
 
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 
+pub fn set_protection(app: &AppHandle, enabled: bool) -> Result<bool, String> {
+    let window = app.get_webview_window("overlay").ok_or("Overlay is unavailable")?;
+    window.set_content_protected(enabled).map_err(|e| e.to_string())?;
+    let store = app.state::<SettingsStore>();
+    store.modify(|s| s.content_protection = enabled);
+    crate::tray::sync(app);
+    app.emit(crate::state::events::STEALTH_CHANGED, serde_json::json!({"stealth": enabled})).map_err(|e| e.to_string())?;
+    crate::settings::save_settings(app, &store.get())?;
+    Ok(enabled)
+}
+
+pub fn toggle_protection(app: &AppHandle) -> Result<bool, String> {
+    set_protection(app, !app.state::<SettingsStore>().get().content_protection)
+}
+
 pub fn set_clickthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let window = app.get_webview_window("overlay").ok_or("Overlay is unavailable")?;
     window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())?;
     app.state::<SettingsStore>().modify(|s| s.click_through = enabled);
+    crate::tray::sync(app);
     crate::diagnostics::record("info", "overlay.clickthrough_changed", None, serde_json::json!({"enabled": enabled}));
     app.emit("overlay:clickthrough", serde_json::json!({"enabled": enabled})).map_err(|e| e.to_string())
 }

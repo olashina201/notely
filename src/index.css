@@ -22,6 +22,27 @@ button svg { flex-shrink: 0; }
 .window-controls { display: flex; align-items: center; gap: 7px; }
 .icon-button { width: 28px; height: 28px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; color: #a9b3ac; background: transparent; border: 0; flex-shrink: 0; }
 .icon-button:hover, .icon-button.selected { color: #c0e4d4; background: #ffffff10; }
+.ghost-mark { display: inline-flex; color: inherit; flex-shrink: 0; }
+.ghost-mark svg { width: 100%; height: 100%; }
+.hide-control { width: auto; gap: 5px; padding: 0 7px; font-size: 10px; }
+.help-content { overflow-y: auto; padding: 0 24px 24px; min-height: 0; user-select: text; }
+.help-intro { display: flex; gap: 12px; align-items: center; padding: 8px 0 20px; }
+.help-badge { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: #91cdb712; color: #a1ddc4; }
+.help-intro h2 { font-size: 17px; font-weight: 500; letter-spacing: -.3px; }
+.help-intro p, .help-card p, .help-card li { font-size: 12px; line-height: 1.75; color: #b2beb6; }
+.help-card { border: 1px solid #ffffff12; border-radius: 12px; padding: 17px; margin-bottom: 12px; background: #ffffff03; }
+.help-card h3 { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 550; margin-bottom: 9px; color: #e1e9e3; }
+.help-card h3 svg { color: #9ac9b5; flex-shrink: 0; }
+.help-card p + p { margin-top: 8px; }
+.help-card ol { list-style: decimal; padding-left: 18px; }
+.help-card li { padding-left: 3px; margin-bottom: 7px; }
+.help-card > button { display: flex; align-items: center; gap: 14px; border: 1px solid #91cdb725; background: #91cdb70b; color: #aedbc7; border-radius: 7px; padding: 7px 10px; margin-top: 12px; font-size: 11px; }
+.help-card > button:hover { background: #91cdb71c; }
+.help-card > section { border-top: 1px solid #ffffff0e; padding-top: 12px; margin-top: 12px; }
+.help-shortcuts { display: grid; gap: 8px; padding: 12px 0; }
+.help-shortcuts > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11px; color: #c1ccc4; }
+.help-content kbd { font-family: inherit; font-size: 10px; border: 1px solid #ffffff18; background: #ffffff06; border-radius: 4px; padding: 2px 5px; white-space: nowrap; }
+@media (max-width: 580px) { .help-content { padding: 0 12px 12px; } .help-card { padding: 12px; } .hide-control span { display: none; } .window-controls { gap: 4px; } }
 .privacy-control { display: flex; align-items: center; gap: 6px; color: #c5b89c; font-size: 10px; border: 1px solid #ffffff1a; border-radius: 6px; padding: 5px 8px; }
 .privacy-control:hover { background: #ffffff08; }
 .privacy-control.requested { color: #9cd4bd; }
@@ -291,3 +312,103 @@ button svg { flex-shrink: 0; }
 .sharing-shortcuts > div { display:flex; justify-content:space-between; align-items:center; gap:8px; }
 .sharing-shortcuts p { grid-column:1/-1; font-size:9px; line-height:1.6; color:#9bae9e; }
 @media(max-width:580px) { .sharing-controls { margin:0 12px 6px; }.sharing-focus-hint{font-size:8px;}.sharing-shortcuts{grid-template-columns:1fr;} }
+.suggestions-caption { color:#97afa0; font-size:10px; margin:0 0 8px; }
+.more-suggestions { margin-top:10px; color:#9bb4a5; font-size:10px; }
+.more-suggestions > summary { width:fit-content; padding:4px 0; }
+.more-suggestions > div { display:flex; gap:5px; flex-wrap:wrap; margin-top:5px; }
+.more-suggestions button { display:flex; gap:6px; align-items:center; padding:6px 8px; border:1px solid #91cdb718; border-radius:6px; }
+.context-actions { padding-top:8px; }
+.context-actions-label { display:block; color:#8fa99a; font-size:9px; padding-left:7px; }
+.context-actions .quick-actions { padding-top:3px; padding-bottom:4px; }
+.more-inline-actions { position:relative; font-size:10px; color:#a7b4aa; }
+.more-inline-actions > summary { list-style:none; padding:5px 8px; border-radius:6px; }
+.more-inline-actions > summary::-webkit-details-marker { display:none; }
+.more-inline-actions > div { position:absolute; z-index:25; bottom:28px; right:0; min-width:180px; padding:5px; border:1px solid #ffffff18; border-radius:9px; background:#282e2b; box-shadow:0 8px 24px #0005; }
+.more-inline-actions button { width:100%; text-align:left; }
+.meeting-context-chip, .draft-action-context { display:flex; align-items:center; gap:6px; padding:5px 8px; margin:3px 0; font-size:9px; color:#9ab7a5; border:1px solid #91cdb719; border-radius:6px; background:#91cdb705; }
+.meeting-context-chip button, .draft-action-context button { display:flex; align-items:center; gap:4px; margin-left:auto; color:#adbcaf; }
+.draft-action-context { color:#bdd5c1; }
+
+/* Diagnostics: readable activity first, technical detail on demand. */
+.diagnostics-panel { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 22px; color: #dce5df; user-select: text; }
+.diagnostics-intro { margin-bottom: 17px; }
+.diagnostics-intro p { font-size: 13px; line-height: 1.65; color: #d0dbd4; }
+.diagnostics-intro > span { display: block; font-size: 11px; line-height: 1.6; color: #a6b5ac; margin-top: 3px; }
+.diagnostics-overview { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #ffffff12; background: #91cdb706; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+.diagnostics-overview > div { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.diagnostics-overview strong { color: #e0ebe4; font-size: 18px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.diagnostics-overview strong.has-issues { color: #e9b297; }
+.diagnostics-overview > div > span { font-size: 11px; color: #b7c4bb; }
+.diagnostics-overview .diagnostics-divider { width: 1px; height: 14px; align-self: center; background: #ffffff20; margin: 0 8px; }
+.diagnostics-live { display: flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; color: #bed1c5; }
+.diagnostics-live input { accent-color: #94ccb1; width: 13px; height: 13px; }
+.live-dot { width: 5px; height: 5px; border-radius: 50%; background: #78837b; }
+.live-dot.active { background: #94ccb1; box-shadow: 0 0 0 3px #94ccb112; }
+.diagnostics-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-bottom: 12px; }
+.diagnostics-search { flex: 1 1 240px; min-width: 0; display: flex; align-items: center; gap: 8px; border: 1px solid #ffffff24; border-radius: 8px; padding: 8px 10px; background: #11171480; color: #a7bbb0; }
+.diagnostics-search:focus-within { border-color: #8cc9af; }
+.secondary-panel .diagnostics-panel .diagnostics-search input { padding: 0; border: 0; outline: none; background: transparent; font-size: 12px; width: 100%; min-width: 0; color: #e0e9e3; }
+.diagnostics-search input::placeholder { color: #a1afa6; }
+.diagnostics-tools { display: flex; gap: 5px; flex-wrap: wrap; }
+.diagnostics-tools button { display: flex; align-items: center; gap: 6px; padding: 8px 9px; border: 1px solid #ffffff18; border-radius: 7px; background: #ffffff04; color: #c7d5cc; font-size: 11px; }
+.diagnostics-tools button:hover { background: #ffffff0c; color: #f0f4ee; }
+.diagnostics-tools .diagnostics-clear { color: #c8b3a6; }
+.diagnostics-filterbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.diagnostics-filterbar > span { font-size: 10px; color: #a5b3aa; }
+.diagnostics-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.diagnostics-filters button { padding: 6px 9px; border-radius: 6px; font-size: 11px; color: #b2c2b8; border: 1px solid transparent; }
+.diagnostics-filters button:hover { background: #ffffff08; }
+.diagnostics-filters button[aria-pressed=true] { background: #91cdb715; border-color: #91cdb72b; color: #b7e3cd; }
+.diagnostics-alert { display: flex; align-items: flex-start; gap: 9px; padding: 12px; color: #f0b9a5; font-size: 12px; line-height: 1.65; border: 1px solid #df967645; background: #df96760c; border-radius: 9px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.diagnostics-alert svg { flex-shrink: 0; margin-top: 2px; }
+.diagnostics-events { display: flex; flex-direction: column; gap: 7px; }
+.diagnostic-event { border: 1px solid #ffffff15; border-radius: 9px; background: #ffffff03; overflow: hidden; }
+.diagnostic-event.error { border-color: #e89c8740; background: #d7806708; }
+.diagnostic-event.warning { border-color: #d9b56c36; background: #c5a86606; }
+.diagnostic-event > summary { display: flex; align-items: center; gap: 11px; padding: 12px; list-style: none; cursor: pointer; }
+.diagnostic-event > summary::-webkit-details-marker, .diagnostic-raw > summary::-webkit-details-marker { display: none; }
+.diagnostic-event > summary:hover { background: #ffffff04; }
+.diagnostic-severity { align-self: flex-start; margin-top: 1px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #91cdb70a; color: #99c5b0; flex-shrink: 0; }
+.error .diagnostic-severity { background: #e89c8714; color: #eeb49d; }
+.warning .diagnostic-severity { background: #d9b56c12; color: #e1c181; }
+.diagnostic-event-main { flex: 1; min-width: 0; }
+.diagnostic-event-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.diagnostic-event-title strong { font-size: 12px; font-weight: 500; line-height: 1.5; color: #e0e9e3; overflow-wrap: anywhere; }
+.diagnostic-badge { font-size: 9px; line-height: 1.5; padding: 1px 6px; border-radius: 4px; color: #afc4b7; background: #91cdb70d; }
+.diagnostic-badge.error { background: #e89c8715; color: #f1b6a2; }
+.diagnostic-badge.warning { background: #d9b56c12; color: #e4c68c; }
+.diagnostic-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; font-size: 10px; line-height: 1.7; color: #b0bfb5; margin-top: 3px; overflow-wrap: anywhere; }
+.diagnostic-meta code { font-size: 9px; color: #98a99e; overflow-wrap: anywhere; }
+.diagnostic-meta .diagnostic-provider { color: #acd4e1; }
+.diagnostic-request { font-family: ui-monospace, monospace; color: #b9c6bd; }
+.diagnostic-event time { align-self: flex-start; margin-top: 3px; font-size: 10px; color: #b1bfb6; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.diagnostic-chevron { color: #9eb6a7; flex-shrink: 0; transition: transform .15s; }
+.diagnostic-event[open] > summary .diagnostic-chevron { transform: rotate(180deg); }
+.diagnostic-details { border-top: 1px solid #ffffff12; padding: 12px 15px 14px; background: #0e151126; }
+.diagnostic-details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; }
+.diagnostic-details dl > div { min-width: 0; }
+.diagnostic-details dt { font-size: 10px; color: #9eafa3; margin-bottom: 3px; }
+.diagnostic-details dd { margin: 0; font-size: 12px; line-height: 1.6; color: #dbe5dd; overflow-wrap: anywhere; }
+.diagnostic-details dd code { font-size: 10px; }
+.diagnostic-raw { border-top: 1px solid #ffffff12; margin-top: 14px; padding-top: 10px; }
+.diagnostic-raw > summary { font-size: 11px; color: #aacbb8; cursor: pointer; }
+.diagnostic-raw pre { font-size: 10px; line-height: 1.8; color: #b7c9be; white-space: pre-wrap; overflow-wrap: anywhere; background: #080f0c55; padding: 12px; border-radius: 6px; margin-top: 10px; }
+.diagnostics-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 32px 15px; color: #aac7b7; border: 1px dashed #ffffff1c; border-radius: 10px; text-align: center; }
+.diagnostics-empty strong { font-size: 13px; font-weight: 500; color: #d8e4dc; }
+.diagnostics-empty p { font-size: 12px; line-height: 1.7; color: #afbeb4; }
+.diagnostics-empty button { color: #b6ddc7; font-size: 11px; padding: 6px 10px; background: #91cdb710; border-radius: 6px; }
+.diagnostics-footer { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; color: #9faea4; font-size: 10px; padding: 15px 0 0; }
+.diagnostics-footer details { min-width: 0; }
+.diagnostics-footer summary { cursor: pointer; color: #abc7b5; }
+.diagnostics-footer code { display: block; max-width: 100%; overflow-wrap: anywhere; margin-top: 7px; line-height: 1.8; color: #c0d0c4; font-size: 10px; }
+@media (max-width: 580px) {
+  .diagnostics-panel { padding: 0 12px 16px; }
+  .diagnostics-overview { align-items: flex-start; flex-direction: column; gap: 9px; padding: 11px; }
+  .diagnostics-search { flex-basis: 100%; }
+  .diagnostic-event > summary { padding: 10px; gap: 8px; flex-wrap: wrap; }
+  .diagnostic-event time { margin-left: 36px; }
+  .diagnostic-chevron { margin-left: auto; }
+  .diagnostic-event-main { flex-basis: calc(100% - 40px); }
+  .diagnostic-details dl { grid-template-columns: 1fr; }
+  .diagnostics-filters button { padding: 6px 7px; font-size: 10px; }
+}

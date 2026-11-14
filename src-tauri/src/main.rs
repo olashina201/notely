@@ -9,16 +9,16 @@ mod diagnostics;
 mod gemini;
 mod live;
 mod notes;
+mod openai_live;
 mod overlay;
 mod providers;
 mod settings;
 mod state;
+mod tray;
 mod vision;
 use commands::MeetingState;
 use settings::SettingsStore;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -88,52 +88,7 @@ fn main() {
             }
             register_hotkeys(&handle, &loaded.hotkeys);
 
-            // System tray icon: gives users a permanent recovery path to show/hide
-            // Notely and quit, even in stealth/accessory mode without Dock presence.
-            let show_i = MenuItem::with_id(app, "show", "Show Notely", true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "Hide Notely", true, None::<&str>)?;
-            let sep1 = PredefinedMenuItem::separator(app)?;
-            let toggle_stealth = MenuItem::with_id(app, "toggle_stealth", "Toggle Stealth Mode (🥷)", true, None::<&str>)?;
-            let toggle_ct = MenuItem::with_id(app, "toggle_clickthrough", "Toggle Click-Through", true, None::<&str>)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit Notely", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &sep1, &toggle_stealth, &toggle_ct, &sep2, &quit_i])?;
-
-            let img = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
-                .map_err(|e| format!("failed to load tray icon: {e}"))?;
-
-            TrayIconBuilder::with_id("tray")
-                .tooltip("Notely Meeting Assistant")
-                .icon(img)
-                .menu(&tray_menu)
-                .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "show" => { let _ = overlay::set_hidden(app, false); }
-                        "hide" => { let _ = overlay::set_hidden(app, true); }
-                        "toggle_clickthrough" => { let _ = overlay::toggle_clickthrough(app); }
-        "toggle_stealth" => {
-                            let store = app.state::<SettingsStore>();
-                            let next = !store.get().content_protection;
-                            store.modify(|s| s.content_protection = next);
-                            let _ = settings::save_settings(app, &store.get());
-                            if let Some(w) = app.get_webview_window("overlay") {
-                                let _ = w.set_content_protected(next);
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                use tauri::ActivationPolicy;
-                                let _ = app.set_activation_policy(ActivationPolicy::Accessory);
-                            }
-                            let _ = app.emit(state::events::STEALTH_CHANGED, serde_json::json!({"stealth": next}));
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .build(app)?;
+            tray::setup(&handle)?;
 
             Ok(())
         })
@@ -145,9 +100,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_recent, diagnostics::diagnostics_clear, diagnostics::diagnostics_frontend, diagnostics::diagnostics_probe,
+            tray::tray_update,
             commands::settings_get, commands::settings_set,
             commands::key_has, commands::key_set, commands::key_clear, commands::key_test,
-            commands::models_list,
+            commands::models_list, commands::transcription_test,
             commands::screen_permission_get, commands::screen_permission_request, commands::screen_permission_open_settings,
             commands::capture_full_cmd, commands::capture_active_cmd, commands::capture_region_cmd, commands::capture_clear, commands::monitors_list,
             commands::selector_begin, commands::selector_end,
@@ -184,8 +140,8 @@ pub(crate) fn register_hotkeys(app: &AppHandle, hotkeys: &std::collections::Hash
             let _ = app.emit(state::events::ERROR, serde_json::json!({"message": format!("hotkey register failed: {binding}")}));
         }
     }
-    // Nudge overlay position: Cmd/Ctrl + arrows move the window.
-    for (binding, dx, dy) in [("CommandOrControl+Left", -20, 0), ("CommandOrControl+Right", 20, 0), ("CommandOrControl+Up", 0, -20), ("CommandOrControl+Down", 0, 20)] {
+    // Require extra modifiers: plain Cmd/Ctrl+arrows belong to text and app navigation.
+    for (binding, dx, dy) in [("CommandOrControl+Alt+Shift+Left", -20, 0), ("CommandOrControl+Alt+Shift+Right", 20, 0), ("CommandOrControl+Alt+Shift+Up", 0, -20), ("CommandOrControl+Alt+Shift+Down", 0, 20)] {
         let (dx, dy) = (dx, dy);
         let _ = gs.on_shortcut(binding, move |app, _s, e| {
             if e.state == ShortcutState::Pressed {
@@ -208,19 +164,9 @@ fn handle_hotkey(app: &AppHandle, tag: &str) {
             }
         }
         "toggle_stealth" => {
-            let store = app.state::<SettingsStore>();
-            let next = !store.get().content_protection;
-            store.modify(|s| s.content_protection = next);
-            let _ = settings::save_settings(app, &store.get());
-            if let Some(w) = app.get_webview_window("overlay") {
-                let _ = w.set_content_protected(next);
+            if let Err(error) = overlay::toggle_protection(app) {
+                let _ = app.emit(state::events::ERROR, serde_json::json!({"message": error}));
             }
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::ActivationPolicy;
-                let _ = app.set_activation_policy(ActivationPolicy::Accessory);
-            }
-            let _ = app.emit(state::events::STEALTH_CHANGED, serde_json::json!({"stealth": next}));
         }
         "capture_full" => {
             let a = app.clone();

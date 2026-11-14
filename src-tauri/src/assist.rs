@@ -91,12 +91,28 @@ pub const PROFILES: &[(&str, &str)] = &[
     ("coding", "You are helping an engineer in a live technical discussion. Give correct, runnable code first, then a brief explanation. Call out edge cases and complexity."),
 ];
 
-pub const PRESETS: &[(&str, &str)] = &[
-    ("say", "Based on the conversation so far, suggest exactly what I should say next. Give 2-3 options: a safe answer, a strong answer, and a clarifying question. Keep each under 2 sentences."),
-    ("followup", "Suggest up to 3 specific, high-value follow-up questions grounded in the conversation and current screen. Rank by usefulness, one line each. Avoid questions already answered. If context is missing, say what context is needed instead of inventing a conversation."),
-    ("recap", "Give a tight recap of the conversation so far: key points, open questions, and anything I may have missed. Under 150 words."),
-    ("screen", "Focus on the current screen. Identify the main task, question, or error and give the most useful answer or next action first. Use only legible details; never guess unreadable text or an unseen cause. Separate what is visible from what you infer. Use the conversation only if directly relevant. Do not provide a generic inventory of the screen or repeat the conversation history. Keep the answer concise unless the visible task requires a complete solution."),
-];
+#[derive(serde::Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct AssistantAction { pub id:String, pub label:String, pub scope:String, pub needs_topic:bool, pub prompt:String }
+pub fn actions()-> &'static [AssistantAction] {
+    static ACTIONS:std::sync::OnceLock<Vec<AssistantAction>>=std::sync::OnceLock::new();
+    ACTIONS.get_or_init(||serde_json::from_str(include_str!("../../src/assistant-actions.json")).expect("Invalid assistant action definitions"))
+}
+pub fn action(id:&str)->Option<&'static AssistantAction>{actions().iter().find(|p|p.id==id)}
+
+pub fn validate_action(preset:Option<&str>,question:&str,recording:bool,include_meeting:bool,has_transcript:bool,has_chat:bool)->Result<(),String>{
+    let Some(id)=preset else{return Ok(());};
+    let action=action(id).ok_or("Unknown assistant action")?;
+    match action.scope.as_str(){
+        "live" if !recording=>return Err("This action needs an active meeting with captured speech.".into()),
+        "review" if recording=>return Err("End the meeting before drafting its follow-up.".into()),
+        "chat" if !has_chat=>return Err("Ask a question in this chat before using chat follow-ups.".into()),
+        _=>{}
+    }
+    if matches!(action.scope.as_str(),"live"|"meeting"|"review")&&(!include_meeting||!has_transcript){return Err("No meeting transcript is attached. Start a meeting and capture speech first.".into());}
+    if action.needs_topic&&question.trim().is_empty(){return Err("Enter the meeting topic you want to revisit.".into());}
+    Ok(())
+}
 
 pub fn profile_system(id: &str, custom: &str) -> String {
     let base = PROFILES
@@ -112,12 +128,7 @@ pub fn profile_system(id: &str, custom: &str) -> String {
     }
 }
 
-pub fn preset_question(key: &str) -> Option<String> {
-    PRESETS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.to_string())
-}
+pub fn preset_question(key:&str)->Option<String>{action(key).map(|p|p.prompt.clone())}
 
 pub async fn run_assist(
     app: AppHandle,
@@ -137,23 +148,23 @@ pub async fn run_assist(
     );
     let meeting_context = transcript
         .iter()
-        .rev()
-        .take(40)
-        .rev()
         .map(|l| format!("[{}] {}", l.speaker, l.text))
         .collect::<Vec<_>>()
         .join("\n");
-    let history = if let Some(conversation_id) = &req.conversation_id {
+    let meeting_action=req.preset.as_deref().and_then(action).is_some_and(|p|matches!(p.scope.as_str(),"live"|"meeting"|"review"));
+    let history = if meeting_action {String::new()} else if let Some(conversation_id) = &req.conversation_id {
         let path = crate::db::db_path(&app)?;
         let db = crate::db::open(&path).map_err(|e| e.to_string())?;
         crate::db::chat_context(&db, conversation_id).map_err(|e| e.to_string())?
     } else { String::new() };
+    let meeting_context = if meeting_context.chars().count() > 120_000 {
+        format!("[Earlier transcript omitted to fit the request; do not infer its contents.]\n{}", meeting_context.chars().rev().take(120_000).collect::<String>().chars().rev().collect::<String>())
+    } else { meeting_context };
     let context = format!("Previous turns in this chat:\n{history}\n\nMeeting transcript:\n{meeting_context}");
-    let question = req
-        .preset
-        .as_deref()
-        .and_then(preset_question)
-        .unwrap_or_else(|| req.question.clone());
+    let question=if let Some(preset)=req.preset.as_deref(){
+        let prompt=preset_question(preset).ok_or("Unknown assistant action")?;
+        if action(preset).is_some_and(|p|p.needs_topic){format!("{prompt}\n\nTopic requested by the user: {}",req.question.trim())}else{prompt}
+    }else{req.question.clone()};
     let p = Prompt {
         model: &model,
         system: &system,
@@ -272,6 +283,30 @@ async fn stream_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actions_require_their_actual_context_before_any_provider_request(){
+        for id in ["say","catchup","followup"] {
+            assert!(validate_action(Some(id),"",false,true,true,true).is_err());
+            assert!(validate_action(Some(id),"",true,true,false,true).is_err());
+            assert!(validate_action(Some(id),"",true,true,true,false).is_ok());
+        }
+        assert!(validate_action(Some("recap"),"",false,true,true,false).is_ok());
+        assert!(validate_action(Some("actions"),"",false,false,true,false).is_err());
+        assert!(validate_action(Some("meeting_followup"),"",true,true,true,false).is_err());
+        assert!(validate_action(Some("meeting_followup"),"",false,true,true,false).is_ok());
+        assert!(validate_action(Some("revisit"),"  ",true,true,true,false).is_err());
+        assert!(validate_action(Some("revisit"),"budget decision",true,true,true,false).is_ok());
+        for id in ["chat_summary","chat_next","chat_explain"] {
+            assert!(validate_action(Some(id),"",false,true,true,false).is_err());
+            assert!(validate_action(Some(id),"",false,false,false,true).is_ok());
+        }
+        assert!(validate_action(Some("screen"),"",false,false,false,false).is_ok());
+        assert!(validate_action(Some("unknown"),"",true,true,true,true).is_err());
+        let ids:std::collections::HashSet<_>=actions().iter().map(|p|p.id.as_str()).collect();
+        assert_eq!(ids.len(),actions().len());
+        assert!(actions().iter().all(|p|!p.prompt.trim().is_empty()&&!p.label.trim().is_empty()));
+    }
+
     #[tokio::test]
     async fn cancellation_survives_preparation_and_old_completion() {
         let mut first = begin_request("first");

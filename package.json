@@ -5,6 +5,7 @@
   "description": "Notely — your macOS AI companion for conversations, screen context, and meeting notes. Gemini, OpenAI, and Claude.",
   "type": "module",
   "scripts": {
+    "icons:generate": "node scripts/generate-icons.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -12,7 +13,8 @@
     "app:sign": "node scripts/sign-macos.mjs",
     "app:bundle": "npm run tauri -- build --debug --bundles app && npm run app:sign",
     "app:build": "npm run tauri -- build --bundles app && npm run app:sign -- src-tauri/target/release/bundle/macos/Notely.app",
-    "app:run": "npm run app:build && open src-tauri/target/release/bundle/macos/Notely.app"
+    "app:run": "npm run app:build && open src-tauri/target/release/bundle/macos/Notely.app",
+    "app:build:windows": "tauri build --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",

@@ -1,9 +1,11 @@
 import * as React from 'react';
+import { commands } from '../api';
 import type { AppSettings, MeetingRow, ModelInfo, NotesJson, TranscriptLine } from '../types';
 import { HOTKEY_ACTIONS, PROFILES, PROVIDERS, type Provider } from '../types';
 import { ProviderFields, CredentialEditor } from './ProviderSettings';
 import { ScreenPermissions } from './ScreenPermissions';
 import { Icon } from './Icon';
+import { shortcutLabel } from './SharingControls';
 
 // ---------- Settings ----------
 
@@ -49,10 +51,12 @@ export function SettingsPanel({ settings, onSave, onClose }: {
         <ProviderFields key={draft.assistantProvider} settings={draft} onChange={setDraft} />
       </section>
       <section className="space-y-2">
-        <div className="text-[11px] uppercase tracking-wide text-white/65">Meeting transcription · Gemini</div>
-        <div className="text-white/65 text-[11.5px]">Live audio still uses Gemini, independently of your assistant provider.</div>
-        {draft.assistantProvider !== 'gemini' && <CredentialEditor provider="gemini" model={draft.fastModel} />}
-        <ModelField label="Live model" value={draft.liveModel} options={[]} onChange={(v) => set('liveModel', v)} />
+        <div className="text-[11px] uppercase tracking-wide text-white/65">Meeting transcription</div>
+        <label className="flex items-center gap-2"><span className="text-white/65 w-32">Audio provider</span><select aria-label="Transcription provider" value={draft.transcriptionProvider} onChange={e => set('transcriptionProvider', e.target.value as AppSettings['transcriptionProvider'])} className="flex-1 min-w-0 bg-white/10 border border-white/12 rounded-lg px-2 py-1.5"><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></label>
+        <p className="text-white/65 text-[11.5px]">Separate from your assistant. OpenAI meetings need only an OpenAI key; Gemini meetings need a Gemini key. Changes apply to the next meeting after saving.</p>
+        <CredentialEditor key={`transcription-${draft.transcriptionProvider}`} provider={draft.transcriptionProvider} model={draft.transcriptionProvider === 'openai' ? draft.openaiTranscriptionModel : draft.liveModel} testConnection={() => commands.transcriptionTest(draft.transcriptionProvider, draft.transcriptionProvider === 'openai' ? draft.openaiTranscriptionModel : draft.liveModel, draft.language)} />
+        <ModelField label="Transcription model" value={draft.transcriptionProvider === 'openai' ? draft.openaiTranscriptionModel : draft.liveModel} options={[]} onChange={v => draft.transcriptionProvider === 'openai' ? set('openaiTranscriptionModel', v) : set('liveModel', v)} />
+        <p className="text-white/65 text-[11.5px]">Claude remains available for chat and meeting notes using either provider’s transcript.</p>
         <label className="flex items-center gap-2">
           <span className="text-white/65 w-32">Language</span>
           <input value={draft.language} onChange={(e) => set('language', e.target.value)}
@@ -86,7 +90,7 @@ export function SettingsPanel({ settings, onSave, onClose }: {
           <span className="text-white/65 w-8 text-right">{Math.round(draft.overlayOpacity * 100)}</span>
         </label>
         <Toggle label="Request screen-capture protection" value={draft.contentProtection} onChange={(v) => set('contentProtection', v)} />
-        <div className="text-[11.5px] text-white/65">Click-through is temporary: use ⌘ Shift T or the menu bar. Show Notely restores mouse input.</div>
+        <div className="text-[11.5px] text-white/65">Click-through is temporary: use {shortcutLabel(draft.hotkeys.toggleClickThrough || 'CommandOrControl+Shift+T')} or the menu bar. Show Notely restores mouse input.</div>
         <Toggle label="Keep screenshots" value={draft.saveCaptures} onChange={(v) => set('saveCaptures', v)} />
         <Toggle label="Auto-attach screenshot" value={draft.autoAttachScreenshot} onChange={(v) => set('autoAttachScreenshot', v)} />
       </section>

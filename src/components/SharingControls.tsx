@@ -3,8 +3,12 @@ import { Icon } from './Icon';
 import { DEFAULT_HOTKEYS } from '../types';
 
 export function shortcutLabel(binding: string) {
+  if (!/Mac|iPhone|iPad/.test(navigator.platform)) {
+    return binding.replace(/CommandOrControl|Control/g, 'Ctrl').replace(/Command|Super/g, 'Win').replace(/Option/g, 'Alt');
+  }
   return binding.replace(/CommandOrControl|Command|Super/g, '⌘').replace(/Control/g, '⌃').replace(/Alt|Option/g, '⌥').replace(/Shift/g, '⇧').replace(/\+/g, '');
 }
+
 export function SharingControls({ enabled, hotkeys }: { enabled: boolean; hotkeys: Record<string,string> }) {
   React.useEffect(() => {
     if (!enabled) return;
