@@ -2,7 +2,6 @@
 #import <objc/runtime.h>
 
 static void (*orig_sendEvent)(id, SEL, NSEvent *) = NULL;
-static void (*orig_setLevel)(id, SEL, NSInteger) = NULL;
 static void (*orig_setCollectionBehavior)(id, SEL, NSUInteger) = NULL;
 
 static BOOL notely_yes(id __unused self, SEL __unused _cmd) {
@@ -18,17 +17,6 @@ static void notely_sendEvent(id self, SEL _cmd, NSEvent *event) {
     }
     if (orig_sendEvent) {
         orig_sendEvent(self, _cmd, event);
-    }
-}
-
-static void notely_setLevel(id self, SEL _cmd, NSInteger level) {
-    // Prevent Tauri/Tao from resetting the level back to floating (3 or 5).
-    // Level 1000 (kCGScreenSaverWindowLevel) is required to float above native macOS fullscreen spaces.
-    if (level < 1000) {
-        level = 1000;
-    }
-    if (orig_setLevel) {
-        orig_setLevel(self, _cmd, level);
     }
 }
 
@@ -82,16 +70,6 @@ void notely_setup_window(void *ptr) {
                 }
             }
 
-            // 3. setLevel:
-            Method mLevel = class_getInstanceMethod(cls, @selector(setLevel:));
-            if (mLevel) {
-                const char *types = method_getTypeEncoding(mLevel);
-                orig_setLevel = (void (*)(id, SEL, NSInteger))method_getImplementation(mLevel);
-                if (!class_addMethod(cls, @selector(setLevel:), (IMP)notely_setLevel, types)) {
-                    class_replaceMethod(cls, @selector(setLevel:), (IMP)notely_setLevel, types);
-                }
-            }
-
             // 4. setCollectionBehavior:
             Method mBehavior = class_getInstanceMethod(cls, @selector(setCollectionBehavior:));
             if (mBehavior) {
@@ -113,15 +91,12 @@ void notely_setup_window(void *ptr) {
                                               NSWindowCollectionBehaviorIgnoresCycle;
         [win setCollectionBehavior:behavior];
 
-        // 7. Enforce level 1000 (kCGScreenSaverWindowLevel) to float above native fullscreen apps (Chrome, Antigravity IDE, etc.)
-        [win setLevel:1000];
+        // Float above ordinary app windows, below the Dock, menus and OS prompts.
+        // Fullscreen visibility comes from collection behavior, not a screensaver-level override.
+        [win setLevel:NSFloatingWindowLevel];
         [win setHidesOnDeactivate:NO];
 
-        // 8. Order front and activate
-        [win orderFrontRegardless];
-        [NSApp activateIgnoringOtherApps:YES];
-        [win makeKeyAndOrderFront:nil];
-        [win makeKeyWindow];
+        // Configuring window levels must never undo an explicit hide or steal focus.
 
         // 9. Observe space transitions: whenever user enters or leaves fullscreen apps or switches spaces,
         // re-order front so Notely is immediately visible on the active space
@@ -132,7 +107,9 @@ void notely_setup_window(void *ptr) {
                             object:nil
                              queue:[NSOperationQueue mainQueue]
                         usingBlock:^(NSNotification * _Nonnull __unused note) {
-                            [win orderFrontRegardless];
+                            if ([win isVisible]) {
+                                [win orderFrontRegardless];
+                            }
                         }];
         }
     }
@@ -149,6 +126,8 @@ void notely_focus_window(void *ptr) {
     if (!ptr) return;
     @autoreleasepool {
         NSWindow *win = (__bridge NSWindow *)ptr;
+        // A queued webview focus request must not reveal an overlay hidden meanwhile.
+        if (![win isVisible]) return;
         [NSApp activateIgnoringOtherApps:YES];
         [win makeKeyAndOrderFront:nil];
         [win makeKeyWindow];
