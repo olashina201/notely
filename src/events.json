@@ -1,0 +1,17 @@
+{
+  "trayAction": "tray:action",
+  "transcriptPartial": "transcript:partial",
+  "transcriptFinal": "transcript:final",
+  "transcriptStatus": "transcript:status",
+  "captureTaken": "capture:taken",
+  "assistChunk": "assist:chunk",
+  "assistDone": "assist:done",
+  "stealthChanged": "stealth:changed",
+  "hotkeyAssist": "hotkey:assist",
+  "hotkeyRegion": "hotkey:capture_region",
+  "hotkeyPreset": "hotkey:preset",
+  "error": "error",
+  "diagnosticsProbe": "diagnostics:probe",
+  "clickthroughChanged": "overlay:clickthrough",
+  "hotkeyFocusChat": "hotkey:focus_chat"
+}

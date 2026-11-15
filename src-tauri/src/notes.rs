@@ -1,23 +1,82 @@
-//! Post-meeting notes: single generateContent call with JSON response schema.
-use crate::gemini;
-use crate::state::TranscriptLine;
-pub const NOTES_SCHEMA: &str = r#"{"type":"object","properties":{"summary":{"type":"string"},"decisions":{"type":"array","items":{"type":"string"}},"actionItems":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"owner":{"type":"string"}},"required":["text"]}},"followUpEmail":{"type":"string"}},"required":["summary","decisions","actionItems","followUpEmail"]}"#;
-pub async fn generate_notes(api_key: &str, model: &str, transcript: &[TranscriptLine], profile: &str) -> Result<serde_json::Value, String> {
-    let full: String = transcript.iter().map(|l| format!("[{}] {}", l.speaker, l.text)).collect::<Vec<_>>().join("\n");
-    let system = format!("You generate structured meeting notes. Profile context: {profile}. Return ONLY valid JSON matching the schema: summary (2-4 sentences), decisions (list), actionItems (list of {{text, owner}}), followUpEmail (ready-to-send email body).");
-    let mut body = gemini::build_contents(&system, &full, "Generate the meeting notes JSON now.", &[]);
-    let schema: serde_json::Value = serde_json::from_str(NOTES_SCHEMA).unwrap();
-    let mut cfg = gemini::generation_config("smart", "high", true);
-    cfg["responseSchema"] = schema;
-    body["generationConfig"] = cfg;
-    let url = gemini::generate_url(model, api_key);
-    let mut attempt: u32 = 0;
-    loop {
-        let resp = reqwest::Client::new().post(&url).json(&body).send().await.map_err(|e| format!("notes request failed: {e}"))?;
-        if resp.status().as_u16() == 429 { attempt += 1; if attempt > 5 { return Err("rate limited (429)".into()); } tokio::time::sleep(std::time::Duration::from_millis(500 * 2u64.pow(attempt.min(4)))).await; continue; }
-        if !resp.status().is_success() { let b = resp.text().await.unwrap_or_default(); return Err(format!("notes failed: {}", &b[..b.len().min(300)])); }
-        let v: serde_json::Value = resp.json().await.map_err(|e| format!("notes parse failed: {e}"))?;
-        let text = v.pointer("/candidates/0/content/parts/0/text").and_then(|t| t.as_str()).ok_or("empty notes response")?;
-        return serde_json::from_str(text).map_err(|e| format!("notes JSON parse failed: {e}"));
+//! Post-meeting notes through the selected assistant provider.
+use crate::{
+    providers::{self, Prompt, Provider},
+    state::TranscriptLine,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingNotes {
+    summary: String,
+    decisions: Vec<String>,
+    action_items: Vec<ActionItem>,
+    follow_up_email: String,
+}
+#[derive(Debug, Deserialize, Serialize)]
+struct ActionItem {
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+}
+
+pub async fn generate_notes(
+    provider: Provider,
+    key: &str,
+    model: &str,
+    transcript: &[TranscriptLine],
+    profile: &str,
+) -> Result<serde_json::Value, String> {
+    let context = transcript
+        .iter()
+        .map(|l| format!("[{}] {}", l.speaker, l.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let system = format!("Generate structured meeting notes. Profile context: {profile}. Use only evidence in the transcript; do not invent decisions, owners, or commitments. Return ONLY a JSON object matching this structure: {{\"summary\": \"2-4 sentences\", \"decisions\": [\"decision\"], \"actionItems\": [{{\"text\": \"action\", \"owner\": \"only if known\"}}], \"followUpEmail\": \"ready-to-send email body\"}}. Empty lists are allowed. Omit owner when unknown.");
+    let text = providers::complete(
+        provider,
+        key,
+        &Prompt {
+            model,
+            system: &system,
+            context: &context,
+            question: "Generate the meeting notes JSON now.",
+            images: &[],
+            smart: true,
+            thinking: "off",
+            grounding: false,
+            json: true,
+        },
+    )
+    .await?;
+    parse_notes(&text)
+}
+
+fn parse_notes(text: &str) -> Result<serde_json::Value, String> {
+    let trimmed = text.trim();
+    let json = if let Some(fenced) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+    {
+        fenced.trim().strip_suffix("```").unwrap_or(fenced).trim()
+    } else {
+        trimmed
+    };
+    let notes: MeetingNotes = serde_json::from_str(json).map_err(|_| {
+        "The model returned invalid meeting notes. Please retry or choose another model."
+    })?;
+    serde_json::to_value(notes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn validates_notes_and_handles_claude_fences() {
+        assert!(parse_notes(r#"{"summary":"ok"}"#).is_err());
+        assert!(parse_notes("not JSON").is_err());
+        let v = parse_notes("```json\n{\"summary\":\"ok\",\"decisions\":[],\"actionItems\":[{\"text\":\"follow up\"}],\"followUpEmail\":\"hi\"}\n```").unwrap();
+        assert_eq!(v["actionItems"][0]["text"], "follow up");
+        assert!(v["actionItems"][0].get("owner").is_none());
     }
 }

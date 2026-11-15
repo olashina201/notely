@@ -192,7 +192,23 @@ By default, Notely records microphone audio seamlessly. To also transcribe incom
 
 ---
 
+### Windows 11 and meeting acceptance checks
+
+- On Windows, use `powershell -File scripts/check-windows.ps1` after installing Node.js, Rust (MSVC), and the C++ Build Tools. The Windows CI workflow also builds an unsigned NSIS installer; its build has not been verified until that workflow or the Windows script passes.
+- In a short test call, state a project name at the beginning, a decision halfway through, and an owner/deadline at the end. Confirm both microphone and other-participant speech appear. On Windows, the call must play through the default output device; on macOS, other participants need a routed loopback input.
+- End the meeting, reopen it in History, generate notes, then restart Notely. Verify the beginning/middle/end transcript and the saved decision, owner, and deadline. Notes are explicitly generated, not automatic.
+- Recognized transcript is checkpointed during recording. The UI shows at most 500 final lines; storage and notes retain the full recognized transcript. “Me”/“Others” label audio sources, not individual speakers. Network/audio failures can still leave gaps; never assume every spoken word was captured.
+
+Suggestions follow the workspace context: profile-specific starters when idle, meeting help after recording starts, review actions after a meeting, and follow-ups for an existing chat. Meeting actions wait for captured speech; Revisit a topic asks for the topic before sending.
+
+Use the header’s **Help (?)** button for permission checks, meeting audio setup, shortcuts, and troubleshooting. **Hide** uses an eye-off icon; restore Notely from the ghost in the menu bar/system tray or your configured Hide / show shortcut. Regenerate the shared ghost app/tray assets with `npm run icons:generate`.
+
+The ghost menu also opens Settings, Help, Diagnostics, and saved work, with quick chat/capture actions and meeting controls. Protection and click-through use live checkmarks; quitting during a meeting saves it before closing.
+
+Meeting transcription now has its own provider in Settings: **OpenAI** (default, `gpt-live-transcribe`) or **Gemini**. Only the selected audio provider’s key is needed for a meeting; Claude, OpenAI, and Gemini remain independent choices for chat and notes. The transcription section’s Test connection validates the live audio setup without sending microphone data. Save provider changes before the next meeting. OpenAI uses client-side speech detection and separate mic/system audio streams; verify quiet speech and both audio sources in a real test call.
+
+---
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
