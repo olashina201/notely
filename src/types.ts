@@ -116,6 +116,7 @@ export interface AppSettings {
 
 export const PROFILES = [
   { id: 'general', name: 'Everyday', icon: 'notebook', description: 'A thoughtful partner for everyday work and decisions.', placeholder: 'Your role, goals, preferences, and how you like answers…' },
+  { id: 'exam', name: 'Exam & Test', icon: 'check', description: 'Direct answers for exams, quizzes, Duolingo, and tests without chatter.', placeholder: 'Test rules, target score, constraints, and instructions…' },
   { id: 'meeting', name: 'Meeting', icon: 'wave', description: 'Talking points, decisions, and clear next steps.', placeholder: 'Your team, project, meeting goals, and your role…' },
   { id: 'coding', name: 'Coding', icon: 'code', description: 'Practical solutions grounded in your stack.', placeholder: 'Languages, framework versions, architecture, coding conventions…' },
   { id: 'writing', name: 'Writing', icon: 'pen', description: 'Clear drafts in your voice, for your audience.', placeholder: 'Audience, tone, style, examples, and words to avoid…' },

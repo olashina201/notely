@@ -62,6 +62,7 @@ export const commands = {
   overlaySetStealth: (enabled: boolean) => invoke<boolean>('overlay_set_stealth', { enabled }),
   overlayFocus: () => invoke<void>('overlay_focus'),
   registerHotkeys: (hotkeys: Record<string, string>) => invoke<void>('register_hotkeys_cmd', { hotkeys }),
+  feLog: (msg: string) => invoke<void>('fe_log', { msg }),
 };
 
 export const events = {

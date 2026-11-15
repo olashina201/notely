@@ -13,25 +13,7 @@ export function Hotkey({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function ResponseView({ text, streaming }: { text: string; streaming: boolean }) {
-  if (!text) {
-    return (
-      <div className="text-[13px] leading-relaxed text-white/50 px-1 py-3 text-center">
-        Press Ctrl/Cmd+Enter for an answer based on the conversation and your screen.
-      </div>
-    );
-  }
-  return (
-    <div className="response-body" aria-busy={streaming}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: false }]]}
-        components={{
-          table: ({ children }) => <div className="markdown-table"><table>{children}</table></div>,
-          a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-        }}>{text}</ReactMarkdown>
-      {streaming && <span className="stream-indicator" aria-label="Writing response" />}
-    </div>
-  );
-}
+export { ResponseView } from './ResponseView';
 
 export function TranscriptView({ lines, recording, systemAudio, provider }: { lines: TranscriptLine[]; recording: boolean; systemAudio?: boolean | null; provider?: string }) {
   const ref = React.useRef<HTMLDivElement>(null);

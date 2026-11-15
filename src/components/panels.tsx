@@ -193,3 +193,203 @@ export function NotesPanel({ notes, generating, onGenerate, disabled }: {
     </div>
   );
 }
+
+// ---------- History ----------
+
+export function HistoryPanel({
+  onSelectChat,
+  onContinueChat,
+}: {
+  onSelectChat?: (turns: { question: string; answer: string }[]) => void;
+  onContinueChat?: (chatId: string, turns: { question: string; answer: string }[]) => void;
+}) {
+  const [q, setQ] = React.useState('');
+  const [filter, setFilter] = React.useState<'all' | 'chat' | 'meeting'>('all');
+  const [chats, setChats] = React.useState<any[]>([]);
+  const [meetings, setMeetings] = React.useState<MeetingRow[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [selectedChat, setSelectedChat] = React.useState<{ id: string; title: string; turns: any[] } | null>(null);
+  const [selectedMeeting, setSelectedMeeting] = React.useState<{ row: MeetingRow; transcript: TranscriptLine[]; notes: NotesJson | null } | null>(null);
+
+  const load = React.useCallback(async (query: string) => {
+    setLoading(true);
+    try {
+      const [c, m] = await Promise.all([
+        commands.chatsList(query).catch(() => []),
+        query.trim() ? commands.historySearch(query).catch(() => []) : commands.historyList(50).catch(() => []),
+      ]);
+      setChats(c);
+      setMeetings(m);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void load(q);
+  }, [load, q]);
+
+  async function openChat(id: string, title: string) {
+    try {
+      const turns = await commands.chatsGet(id);
+      setSelectedChat({ id, title, turns });
+      setSelectedMeeting(null);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function openMeeting(id: number) {
+    try {
+      const row = await commands.historyGet(id);
+      if (row) {
+        let transcript: TranscriptLine[] = [];
+        try { transcript = JSON.parse(row.transcriptJson); } catch {}
+        let notes: NotesJson | null = null;
+        try { if (row.notesJson) notes = JSON.parse(row.notesJson); } catch {}
+        setSelectedMeeting({ row, transcript, notes });
+        setSelectedChat(null);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function deleteChat(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    await commands.chatsDelete(id).catch(() => {});
+    if (selectedChat?.id === id) setSelectedChat(null);
+    void load(q);
+  }
+
+  async function deleteMeeting(id: number, e: React.MouseEvent) {
+    e.stopPropagation();
+    await commands.historyDelete(id).catch(() => {});
+    if (selectedMeeting?.row.id === id) setSelectedMeeting(null);
+    void load(q);
+  }
+
+  // Selected chat details
+  if (selectedChat) {
+    return (
+      <div className="flex-1 flex flex-col min-h-0 text-[12.5px] text-white/90">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+          <button onClick={() => setSelectedChat(null)} className="text-white/60 hover:text-white flex items-center gap-1 text-[12px]">
+            ← Back to history
+          </button>
+          {onContinueChat && (
+            <button
+              onClick={() => onContinueChat(selectedChat.id, selectedChat.turns)}
+              className="px-2.5 py-1 rounded bg-blue-600/80 hover:bg-blue-600 text-white text-[11.5px]"
+            >
+              Continue in chat →
+            </button>
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4 min-h-0 select-text">
+          <h3 className="text-[14px] font-semibold text-white/95">{selectedChat.title}</h3>
+          {selectedChat.turns.map((t, idx) => (
+            <div key={idx} className="space-y-1.5 pb-3 border-b border-white/5 last:border-b-0">
+              <div className="text-[11.5px] font-medium text-sky-300">Q: {t.question}</div>
+              <div className="text-[12.5px] text-white/80 whitespace-pre-wrap leading-relaxed">{t.answer}</div>
+              <div className="text-[10px] text-white/40">{t.provider} · {t.model} · {new Date(t.createdAt).toLocaleTimeString()}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Selected meeting details
+  if (selectedMeeting) {
+    return (
+      <div className="flex-1 flex flex-col min-h-0 text-[12.5px] text-white/90">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+          <button onClick={() => setSelectedMeeting(null)} className="text-white/60 hover:text-white flex items-center gap-1 text-[12px]">
+            ← Back to history
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0 select-text">
+          <h3 className="text-[14px] font-semibold text-white/95">
+            {selectedMeeting.row.title || `Meeting ${new Date(selectedMeeting.row.startedAt).toLocaleString()}`}
+          </h3>
+          {selectedMeeting.notes && (
+            <div className="space-y-2 p-2.5 rounded-lg bg-white/5 border border-white/10">
+              <div className="text-[11px] uppercase tracking-wide text-white/60">Meeting Summary</div>
+              <p className="whitespace-pre-wrap text-[12px]">{selectedMeeting.notes.summary}</p>
+            </div>
+          )}
+          <div className="text-[11px] uppercase tracking-wide text-white/60">Transcript ({selectedMeeting.transcript.length} lines)</div>
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {selectedMeeting.transcript.map((l) => (
+              <div key={l.id} className="text-[12px] leading-snug">
+                <span className={l.speaker === 'me' ? 'text-sky-300' : 'text-emerald-300'}>{l.speaker === 'me' ? 'Me' : 'Others'}</span>
+                <span className="text-white/30"> · </span>
+                <span className="text-white/85">{l.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const items = [
+    ...(filter === 'all' || filter === 'chat' ? chats.map((c) => ({ type: 'chat' as const, id: c.id, title: c.title, time: c.updatedAt, profile: c.profileId, subtitle: `${c.turnCount} turn${c.turnCount === 1 ? '' : 's'}` })) : []),
+    ...(filter === 'all' || filter === 'meeting' ? meetings.map((m) => ({ type: 'meeting' as const, id: m.id, title: m.title || `Meeting ${new Date(m.startedAt).toLocaleString()}`, time: m.startedAt, profile: m.profileId, subtitle: m.notesJson ? 'Notes ready' : 'Transcript' })) : []),
+  ].sort((a, b) => b.time - a.time);
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex gap-1.5 px-3 py-2 border-b border-white/10">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search past chats & meetings…"
+          className="flex-1 min-w-0 bg-white/10 border border-white/15 rounded-lg px-2.5 py-1 text-[12px] outline-none text-white placeholder:text-white/40"
+        />
+        <div className="flex items-center gap-1 bg-white/10 rounded-lg p-0.5 border border-white/10 text-[11px]">
+          <button onClick={() => setFilter('all')} className={`px-2 py-0.5 rounded ${filter === 'all' ? 'bg-white/20 text-white' : 'text-white/60'}`}>All</button>
+          <button onClick={() => setFilter('chat')} className={`px-2 py-0.5 rounded ${filter === 'chat' ? 'bg-white/20 text-white' : 'text-white/60'}`}>Chats</button>
+          <button onClick={() => setFilter('meeting')} className={`px-2 py-0.5 rounded ${filter === 'meeting' ? 'bg-white/20 text-white' : 'text-white/60'}`}>Meetings</button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {loading && <div className="text-[12px] text-white/40 text-center py-4">Loading…</div>}
+        {!loading && items.length === 0 && (
+          <div className="text-[12px] text-white/35 text-center py-6">
+            {q ? 'No matching history found.' : 'No saved chats or meetings yet.'}
+          </div>
+        )}
+        {items.map((item) => (
+          <div
+            key={`${item.type}-${item.id}`}
+            onClick={() => (item.type === 'chat' ? openChat(item.id as string, item.title) : openMeeting(item.id as number))}
+            className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/5 hover:bg-white/5 cursor-pointer transition"
+          >
+            <div className="flex-1 min-w-0 pr-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px]">{item.type === 'chat' ? '💬' : '🎙️'}</span>
+                <span className="text-[12.5px] text-white/90 truncate font-medium">{item.title}</span>
+              </div>
+              <div className="text-[11px] text-white/45 mt-0.5">
+                {new Date(item.time).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                {' · '}{item.subtitle}
+                {item.profile ? ` · ${item.profile}` : ''}
+              </div>
+            </div>
+            <button
+              onClick={(e) => (item.type === 'chat' ? deleteChat(item.id as string, e) : deleteMeeting(item.id as number, e))}
+              className="text-white/30 hover:text-red-300 p-1 text-[12px]"
+              title="Delete permanently"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
